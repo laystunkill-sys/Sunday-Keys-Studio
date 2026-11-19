@@ -1,0 +1,802 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { audioEngine } from './audio/AudioEngine';
+import { AudioMidiSettingsView } from './components/AudioMidiSettingsView';
+import { ChannelStrip } from './components/ChannelStrip';
+import { EffectsRack } from './components/EffectsRack';
+import { ImportSoundView } from './components/ImportSoundView';
+import { PatchBuilderView } from './components/PatchBuilderView';
+import { PatchLibraryView } from './components/PatchLibraryView';
+import { PerformanceKeyboard } from './components/PerformanceKeyboard';
+import { SavePatchModal } from './components/SavePatchModal';
+import { SetlistSidebar } from './components/SetlistSidebar';
+import { SoundBrowserModal } from './components/SoundBrowserModal';
+import { TonicPadConsole } from './components/TonicPadConsole';
+import { TopBar } from './components/TopBar';
+import { TransportStageBar } from './components/TransportStageBar';
+import { CURATED_PATCHES, DEFAULT_SETLISTS } from './data/instruments';
+import { useMidi } from './hooks/useMidi';
+import {
+  deleteCustomSound,
+  loadAllCustomSounds,
+  saveCustomSound,
+  StoredCustomSound,
+} from './storage/customSoundStore';
+import {
+  InstrumentPreset,
+  LayerConfig,
+  MasterEffectsConfig,
+  MusicalKey,
+  PatchCategory,
+  Setlist,
+  SetlistSong,
+  TimeSignature,
+  TonicPadConfig,
+  WorkspaceTab,
+  WorshipPatch,
+} from './types/worship';
+
+const STORAGE_SETLISTS_KEY = 'sunday-keys-setlists-v1';
+const STORAGE_CUSTOM_PATCHES_KEY = 'sunday-keys-custom-patches-v1';
+
+const QWERTY_OFFSET_MAP: Record<string, number> = {
+  // Lower octave starting at startMidi
+  z: 0,
+  s: 1,
+  x: 2,
+  d: 3,
+  c: 4,
+  v: 5,
+  g: 6,
+  b: 7,
+  h: 8,
+  n: 9,
+  j: 10,
+  m: 11,
+  ',': 12,
+  l: 13,
+  '.': 14,
+  ';': 15,
+  '/': 16,
+  // Upper octave starting at startMidi + 12
+  q: 12,
+  '2': 13,
+  w: 14,
+  '3': 15,
+  e: 16,
+  r: 17,
+  '5': 18,
+  t: 19,
+  '6': 20,
+  y: 21,
+  '7': 22,
+  u: 23,
+  i: 24,
+  '9': 25,
+  o: 26,
+  '0': 27,
+  p: 28,
+};
+
+function loadInitialSetlists(): Setlist[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_SETLISTS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Setlist[];
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return DEFAULT_SETLISTS;
+}
+
+function loadInitialCustomPatches(): WorshipPatch[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_CUSTOM_PATCHES_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as WorshipPatch[];
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return [];
+}
+
+function clonePatch(patch: WorshipPatch): WorshipPatch {
+  return {
+    ...patch,
+    layers: patch.layers.map((l) => ({ ...l })) as WorshipPatch['layers'],
+    effects: { ...patch.effects },
+  };
+}
+
+export default function App() {
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>('perform');
+  const [setlists, setSetlists] = useState<Setlist[]>(loadInitialSetlists);
+  const [customPatches, setCustomPatches] = useState<WorshipPatch[]>(loadInitialCustomPatches);
+
+  const [activeSetlistId, setActiveSetlistId] = useState<string>(() => loadInitialSetlists()[0].id);
+  const [activeSongId, setActiveSongId] = useState<string>(
+    () => loadInitialSetlists()[0].songs[0]?.id || '',
+  );
+
+  const [builderSlot, setBuilderSlot] = useState<number>(0);
+  const [soundBrowserSlot, setSoundBrowserSlot] = useState<number | null>(null);
+  const [showSaveModal, setShowSaveModal] = useState(false);
+  const [customSounds, setCustomSounds] = useState<StoredCustomSound[]>([]);
+
+  // Live Performance Runtime States
+  const [audioRunning, setAudioRunning] = useState(false);
+  const [modWheel, setModWheel] = useState(0.28);
+  const [sustainDown, setSustainDown] = useState(false);
+  const [transpose, setTranspose] = useState(0);
+  const [clickEnabled, setClickEnabled] = useState(false);
+  const [activeBeat, setActiveBeat] = useState(0);
+  const [baseOctave, setBaseOctave] = useState(2); // C3 start
+  const [activeNotes, setActiveNotes] = useState<Set<number>>(() => new Set());
+  const [meters, setMeters] = useState<{ master: number; layers: number[] }>({
+    master: 0,
+    layers: [0, 0, 0, 0, 0],
+  });
+
+  const [tonicPad, setTonicPad] = useState<TonicPadConfig>({
+    active: false,
+    key: 'A',
+    volume: 0.65,
+    brightness: 0.45,
+    preset: 'warm-analog',
+    followSongKey: true,
+  });
+
+  const activeSetlist = useMemo(
+    () => setlists.find((s) => s.id === activeSetlistId) || setlists[0],
+    [activeSetlistId, setlists],
+  );
+
+  const activeSong: SetlistSong | undefined = useMemo(
+    () =>
+      activeSetlist?.songs.find((song) => song.id === activeSongId) ||
+      activeSetlist?.songs[0],
+    [activeSetlist, activeSongId],
+  );
+
+  const currentPatch: WorshipPatch = activeSong?.patch || CURATED_PATCHES[0];
+  const currentKey: MusicalKey = activeSong?.key || currentPatch.key;
+  const currentBpm: number = activeSong?.bpm || currentPatch.bpm;
+  const currentTimeSig: TimeSignature = activeSong?.timeSignature || currentPatch.timeSignature;
+
+  // Persist setlists and custom patches
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_SETLISTS_KEY, JSON.stringify(setlists));
+    } catch {
+      // ignore
+    }
+  }, [setlists]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_CUSTOM_PATCHES_KEY, JSON.stringify(customPatches));
+    } catch {
+      // ignore
+    }
+  }, [customPatches]);
+
+  // Load persisted external audio samples from IndexedDB
+  useEffect(() => {
+    let active = true;
+    void loadAllCustomSounds().then(async (items) => {
+      if (!active) return;
+      for (const item of items) {
+        await audioEngine.registerCustomSound(item.preset, item.audioData);
+      }
+      if (active) {
+        setCustomSounds(items);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const customInstruments = useMemo(
+    () => customSounds.map((s) => s.preset),
+    [customSounds],
+  );
+
+  // Sync audio engine with current patch & transport state
+  useEffect(() => {
+    audioEngine.updateLayers(currentPatch.layers);
+  }, [currentPatch.layers]);
+
+  useEffect(() => {
+    audioEngine.updateEffects(currentPatch.effects);
+  }, [currentPatch.effects]);
+
+  useEffect(() => {
+    audioEngine.updateTempo(currentBpm, currentTimeSig);
+  }, [currentBpm, currentTimeSig]);
+
+  useEffect(() => {
+    audioEngine.setModWheel(modWheel);
+  }, [modWheel]);
+
+  useEffect(() => {
+    audioEngine.setTranspose(transpose);
+  }, [transpose]);
+
+  useEffect(() => {
+    audioEngine.setClickEnabled(clickEnabled);
+  }, [clickEnabled]);
+
+  useEffect(() => {
+    audioEngine.setOnBeatCallback((beat) => {
+      setActiveBeat(beat);
+    });
+    return () => audioEngine.setOnBeatCallback(null);
+  }, []);
+
+  // Keep Tonic Pad key synced to song key if followSongKey is enabled
+  useEffect(() => {
+    if (tonicPad.followSongKey && tonicPad.key !== currentKey) {
+      setTonicPad((prev) => ({ ...prev, key: currentKey }));
+    }
+  }, [currentKey, tonicPad.followSongKey, tonicPad.key]);
+
+  useEffect(() => {
+    audioEngine.updateTonicPad(tonicPad);
+  }, [tonicPad]);
+
+  const ensureAudioStarted = useCallback(async () => {
+    await audioEngine.init();
+    setAudioRunning(audioEngine.isRunning());
+  }, []);
+
+  // Metering loop while audio engine is running
+  useEffect(() => {
+    if (!audioRunning) return;
+    let rafId = 0;
+    let lastUpdate = 0;
+    const tick = (now: number) => {
+      if (now - lastUpdate > 40) {
+        lastUpdate = now;
+        setMeters(audioEngine.getMeterLevels());
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, [audioRunning]);
+
+  // Note triggers
+  const handleNoteOn = useCallback(
+    async (midi: number, velocity = 0.8) => {
+      if (!audioEngine.isRunning()) {
+        await ensureAudioStarted();
+      }
+      await audioEngine.noteOn(midi, velocity);
+      setActiveNotes((prev) => {
+        const next = new Set(prev);
+        next.add(midi);
+        return next;
+      });
+    },
+    [ensureAudioStarted],
+  );
+
+  const handleNoteOff = useCallback((midi: number) => {
+    audioEngine.noteOff(midi);
+    setActiveNotes((prev) => {
+      if (!prev.has(midi)) return prev;
+      const next = new Set(prev);
+      next.delete(midi);
+      return next;
+    });
+  }, []);
+
+  const handleToggleSustain = useCallback((forceVal?: boolean) => {
+    setSustainDown((prev) => {
+      const next = typeof forceVal === 'boolean' ? forceVal : !prev;
+      audioEngine.setSustain(next);
+      return next;
+    });
+  }, []);
+
+  const handlePanic = useCallback(() => {
+    audioEngine.panic();
+    setSustainDown(false);
+    setActiveNotes(new Set());
+  }, []);
+
+  // Web MIDI Connection
+  const midi = useMidi({
+    onNoteOn: (n, v) => {
+      void handleNoteOn(n, v);
+    },
+    onNoteOff: handleNoteOff,
+    onModWheel: (v) => setModWheel(v),
+    onSustain: (down) => handleToggleSustain(down),
+    onMasterVolume: (vol) => {
+      updateActiveEffects({ masterVolume: vol });
+    },
+  });
+
+  // Patch & Song Mutators
+  const updateActiveSong = useCallback(
+    (updater: (song: SetlistSong) => SetlistSong) => {
+      setSetlists((prev) =>
+        prev.map((sl) => {
+          if (sl.id !== activeSetlist.id) return sl;
+          return {
+            ...sl,
+            songs: sl.songs.map((song) =>
+              song.id === activeSong?.id ? updater(song) : song,
+            ),
+          };
+        }),
+      );
+    },
+    [activeSetlist.id, activeSong?.id],
+  );
+
+  const updateLayer = useCallback(
+    (slotIndex: number, patch: Partial<LayerConfig>) => {
+      updateActiveSong((song) => ({
+        ...song,
+        patch: {
+          ...song.patch,
+          layers: song.patch.layers.map((l) =>
+            l.slotIndex === slotIndex ? { ...l, ...patch } : l,
+          ) as WorshipPatch['layers'],
+        },
+      }));
+    },
+    [updateActiveSong],
+  );
+
+  const updateActiveEffects = useCallback(
+    (patch: Partial<MasterEffectsConfig>) => {
+      updateActiveSong((song) => ({
+        ...song,
+        patch: {
+          ...song.patch,
+          effects: { ...song.patch.effects, ...patch },
+        },
+      }));
+    },
+    [updateActiveSong],
+  );
+
+  const handleSelectSong = useCallback((song: SetlistSong) => {
+    setActiveSongId(song.id);
+    if (tonicPad.followSongKey) {
+      setTonicPad((prev) => ({ ...prev, key: song.key }));
+    }
+  }, [tonicPad.followSongKey]);
+
+  const handleStepSong = useCallback(
+    (direction: -1 | 1) => {
+      const songs = activeSetlist?.songs || [];
+      const idx = songs.findIndex((s) => s.id === activeSong?.id);
+      if (idx === -1) return;
+      const nextIdx = Math.max(0, Math.min(songs.length - 1, idx + direction));
+      if (songs[nextIdx]) handleSelectSong(songs[nextIdx]);
+    },
+    [activeSetlist?.songs, activeSong?.id, handleSelectSong],
+  );
+
+  const handleMoveSong = useCallback(
+    (songId: string, direction: -1 | 1) => {
+      setSetlists((prev) =>
+        prev.map((sl) => {
+          if (sl.id !== activeSetlist.id) return sl;
+          const idx = sl.songs.findIndex((s) => s.id === songId);
+          const targetIdx = idx + direction;
+          if (idx === -1 || targetIdx < 0 || targetIdx >= sl.songs.length) return sl;
+          const nextSongs = [...sl.songs];
+          const [moved] = nextSongs.splice(idx, 1);
+          nextSongs.splice(targetIdx, 0, moved);
+          return { ...sl, songs: nextSongs };
+        }),
+      );
+    },
+    [activeSetlist.id],
+  );
+
+  const handleDeleteSong = useCallback(
+    (songId: string) => {
+      setSetlists((prev) =>
+        prev.map((sl) => {
+          if (sl.id !== activeSetlist.id) return sl;
+          const remaining = sl.songs.filter((s) => s.id !== songId);
+          if (songId === activeSongId && remaining[0]) {
+            setActiveSongId(remaining[0].id);
+          }
+          return { ...sl, songs: remaining };
+        }),
+      );
+    },
+    [activeSetlist.id, activeSongId],
+  );
+
+  const handleAddPatchToSetlist = useCallback(
+    (patch: WorshipPatch) => {
+      const newSong: SetlistSong = {
+        id: `song-${Date.now()}`,
+        title: patch.name,
+        artist: patch.category,
+        key: patch.key,
+        bpm: patch.bpm,
+        timeSignature: patch.timeSignature,
+        notes: patch.description,
+        patch: clonePatch(patch),
+      };
+      setSetlists((prev) =>
+        prev.map((sl) =>
+          sl.id === activeSetlist.id
+            ? { ...sl, songs: [...sl.songs, newSong] }
+            : sl,
+        ),
+      );
+      setActiveSongId(newSong.id);
+      setActiveTab('perform');
+    },
+    [activeSetlist.id],
+  );
+
+  const handleLoadPatchIntoSong = useCallback(
+    (patch: WorshipPatch) => {
+      updateActiveSong((song) => ({
+        ...song,
+        patch: clonePatch(patch),
+      }));
+      setActiveTab('perform');
+    },
+    [updateActiveSong],
+  );
+
+  const handleSaveNewCustomPatch = useCallback(
+    (name: string, category: PatchCategory, description: string) => {
+      const saved: WorshipPatch = {
+        ...clonePatch(currentPatch),
+        id: `custom-${Date.now()}`,
+        name,
+        category,
+        description,
+        key: currentKey,
+        bpm: currentBpm,
+        timeSignature: currentTimeSig,
+        isCustom: true,
+      };
+      setCustomPatches((prev) => [saved, ...prev]);
+      updateActiveSong((song) => ({ ...song, patch: clonePatch(saved) }));
+    },
+    [currentBpm, currentKey, currentPatch, currentTimeSig, updateActiveSong],
+  );
+
+  const handleAddCustomSound = useCallback(
+    async (record: StoredCustomSound, decodedBuffer: AudioBuffer) => {
+      await audioEngine.registerCustomSound(record.preset, record.audioData, decodedBuffer);
+      await saveCustomSound(record);
+      setCustomSounds((prev) => [record, ...prev]);
+    },
+    [],
+  );
+
+  const handleUpdateCustomSound = useCallback(
+    async (preset: InstrumentPreset) => {
+      audioEngine.updateCustomInstrumentMeta(preset);
+      const existing = customSounds.find((item) => item.id === preset.id);
+      setCustomSounds((prev) =>
+        prev.map((item) => (item.id === preset.id ? { ...item, preset } : item)),
+      );
+      if (existing) {
+        await saveCustomSound({ ...existing, preset });
+      }
+    },
+    [customSounds],
+  );
+
+  const handleDeleteCustomSound = useCallback(async (id: string) => {
+    audioEngine.removeCustomSound(id);
+    await deleteCustomSound(id);
+    setCustomSounds((prev) => prev.filter((s) => s.id !== id));
+  }, []);
+
+  // QWERTY Keyboard Playability + Spacebar Sustain
+  const pressedKeysRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    const isInputFocused = (target: EventTarget | null): boolean => {
+      if (!(target instanceof HTMLElement)) return false;
+      const tag = target.tagName.toLowerCase();
+      return tag === 'input' || tag === 'textarea' || tag === 'select';
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (isInputFocused(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.repeat) return;
+
+      if (e.code === 'Space') {
+        e.preventDefault();
+        handleToggleSustain(true);
+        return;
+      }
+      if (e.key === '[') {
+        handleStepSong(-1);
+        return;
+      }
+      if (e.key === ']') {
+        handleStepSong(1);
+        return;
+      }
+
+      const key = e.key.toLowerCase();
+      if (key in QWERTY_OFFSET_MAP && !pressedKeysRef.current.has(key)) {
+        pressedKeysRef.current.add(key);
+        const startMidi = (baseOctave + 1) * 12;
+        const midi = startMidi + QWERTY_OFFSET_MAP[key];
+        void handleNoteOn(midi, 0.8);
+      }
+    };
+
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'Space') {
+        handleToggleSustain(false);
+        return;
+      }
+      const key = e.key.toLowerCase();
+      if (key in QWERTY_OFFSET_MAP && pressedKeysRef.current.has(key)) {
+        pressedKeysRef.current.delete(key);
+        const startMidi = (baseOctave + 1) * 12;
+        const midi = startMidi + QWERTY_OFFSET_MAP[key];
+        handleNoteOff(midi);
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+    };
+  }, [baseOctave, handleNoteOff, handleNoteOn, handleStepSong, handleToggleSustain]);
+
+  const allPatches = useMemo(
+    () => [...customPatches, ...CURATED_PATCHES],
+    [customPatches],
+  );
+
+  const anySoloed = currentPatch.layers.some((l) => l.soloed);
+
+  return (
+    <div className="min-h-screen flex flex-col bg-[#0B0D12] text-[#F1F5F9]">
+      <TopBar
+        activeTab={activeTab}
+        onSelectTab={setActiveTab}
+        audioRunning={audioRunning}
+        onStartAudio={ensureAudioStarted}
+        onOpenSaveModal={() => setShowSaveModal(true)}
+      />
+
+      <div className="flex-1 flex flex-col lg:flex-row min-h-0">
+        {/* Left Setlist Sidebar */}
+        <SetlistSidebar
+          setlists={setlists}
+          activeSetlistId={activeSetlist.id}
+          activeSongId={activeSong?.id || ''}
+          onSelectSetlist={(id) => {
+            setActiveSetlistId(id);
+            const target = setlists.find((s) => s.id === id);
+            if (target?.songs[0]) {
+              handleSelectSong(target.songs[0]);
+            }
+          }}
+          onSelectSong={handleSelectSong}
+          onStepSong={handleStepSong}
+          onMoveSong={handleMoveSong}
+          onDeleteSong={handleDeleteSong}
+          onAddCurrentToSetlist={() => handleAddPatchToSetlist(currentPatch)}
+        />
+
+        {/* Main Workspace Area */}
+        <main className="flex-1 flex flex-col min-w-0 min-h-0">
+          <TransportStageBar
+            patchName={currentPatch.name}
+            songTitle={activeSong?.title || currentPatch.name}
+            songKey={currentKey}
+            bpm={currentBpm}
+            timeSignature={currentTimeSig}
+            transpose={transpose}
+            clickEnabled={clickEnabled}
+            activeBeat={activeBeat}
+            sustainDown={sustainDown}
+            masterVolume={currentPatch.effects.masterVolume}
+            masterLevel={meters.master}
+            onChangeKey={(key) => updateActiveSong((s) => ({ ...s, key }))}
+            onChangeBpm={(bpm) => updateActiveSong((s) => ({ ...s, bpm }))}
+            onChangeTimeSignature={(timeSignature) =>
+              updateActiveSong((s) => ({ ...s, timeSignature }))
+            }
+            onChangeTranspose={setTranspose}
+            onToggleClick={async () => {
+              if (!audioRunning) await ensureAudioStarted();
+              setClickEnabled((prev) => !prev);
+            }}
+            onToggleSustain={() => handleToggleSustain()}
+            onPanic={handlePanic}
+            onChangeMasterVolume={(masterVolume) =>
+              updateActiveEffects({ masterVolume })
+            }
+          />
+
+          {/* View Content */}
+          <div className="flex-1 overflow-y-auto">
+            {activeTab === 'perform' && (
+              <div className="p-4 space-y-4">
+                {/* 5-Layer Real-Time Mixer */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-3">
+                  {currentPatch.layers.map((layer, idx) => (
+                    <ChannelStrip
+                      key={layer.slotIndex}
+                      layer={layer}
+                      meterLevel={meters.layers[idx] || 0}
+                      anySoloed={anySoloed}
+                      onUpdate={(patch) => updateLayer(layer.slotIndex, patch)}
+                      onOpenBuilder={(slotIdx) => {
+                        setBuilderSlot(slotIdx);
+                        setActiveTab('builder');
+                      }}
+                      onOpenSoundBrowser={(slotIdx) => setSoundBrowserSlot(slotIdx)}
+                    />
+                  ))}
+                </div>
+
+                {/* Tonic Pad & Master Effects Rack */}
+                <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                  <TonicPadConsole
+                    config={tonicPad}
+                    songKey={currentKey}
+                    onChange={async (patch) => {
+                      if (patch.active && !audioRunning) {
+                        await ensureAudioStarted();
+                      }
+                      setTonicPad((prev) => ({ ...prev, ...patch }));
+                    }}
+                  />
+
+                  <EffectsRack
+                    effects={currentPatch.effects}
+                    modWheel={modWheel}
+                    onChangeModWheel={setModWheel}
+                    onChangeEffects={updateActiveEffects}
+                  />
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'builder' && (
+              <PatchBuilderView
+                layers={currentPatch.layers}
+                customInstruments={customInstruments}
+                selectedSlot={builderSlot}
+                onSelectSlot={setBuilderSlot}
+                onUpdateLayer={updateLayer}
+                onOpenSaveModal={() => setShowSaveModal(true)}
+                onOpenSoundBrowser={(slotIdx) => setSoundBrowserSlot(slotIdx)}
+              />
+            )}
+
+            {activeTab === 'library' && (
+              <PatchLibraryView
+                patches={allPatches}
+                activePatchId={currentPatch.id}
+                onLoadPatch={handleLoadPatchIntoSong}
+                onAddPatchToSetlist={handleAddPatchToSetlist}
+                onDeleteCustomPatch={(id) =>
+                  setCustomPatches((prev) => prev.filter((p) => p.id !== id))
+                }
+              />
+            )}
+
+            {activeTab === 'import' && (
+              <ImportSoundView
+                customSounds={customSounds}
+                layers={currentPatch.layers}
+                onAddCustomSound={handleAddCustomSound}
+                onUpdateCustomSound={handleUpdateCustomSound}
+                onDeleteCustomSound={handleDeleteCustomSound}
+                onAssignToLayer={(slotIdx, preset) => {
+                  updateLayer(slotIdx, {
+                    instrumentId: preset.id,
+                    enabled: true,
+                    label: preset.name.split(' ').slice(0, 2).join(' '),
+                  });
+                  setActiveTab('perform');
+                }}
+                onAuditionSound={async (preset) => {
+                  await ensureAudioStarted();
+                  await audioEngine.previewInstrument(preset.id);
+                }}
+              />
+            )}
+
+            {activeTab === 'midi' && (
+              <AudioMidiSettingsView
+                audioRunning={audioRunning}
+                sampleRate={audioEngine.getSampleRate()}
+                activeVoices={audioEngine.getActiveVoiceCount()}
+                midiSupported={midi.supported}
+                midiAccessState={midi.accessState}
+                devices={midi.devices}
+                selectedDeviceId={midi.selectedDeviceId}
+                channelFilter={midi.channelFilter}
+                eventLog={midi.eventLog}
+                onStartAudio={ensureAudioStarted}
+                onTestChord={async () => {
+                  await ensureAudioStarted();
+                  const testNotes = [48, 55, 60, 62, 64];
+                  testNotes.forEach((n) => void handleNoteOn(n, 0.78));
+                  window.setTimeout(() => {
+                    testNotes.forEach((n) => handleNoteOff(n));
+                  }, 1200);
+                }}
+                onRefreshMidi={midi.connectMidi}
+                onSelectDevice={midi.setSelectedDeviceId}
+                onChangeChannelFilter={midi.setChannelFilter}
+                onClearLog={midi.clearLog}
+                onResetWorkspace={() => {
+                  setSetlists(DEFAULT_SETLISTS);
+                  setCustomPatches([]);
+                  setActiveSetlistId(DEFAULT_SETLISTS[0].id);
+                  setActiveSongId(DEFAULT_SETLISTS[0].songs[0].id);
+                }}
+              />
+            )}
+          </div>
+
+          {/* Bottom Anchored Playable Stage Deck */}
+          <PerformanceKeyboard
+            songKey={currentKey}
+            layers={currentPatch.layers}
+            activeNotes={activeNotes}
+            baseOctave={baseOctave}
+            onChangeBaseOctave={setBaseOctave}
+            onNoteOn={handleNoteOn}
+            onNoteOff={handleNoteOff}
+          />
+        </main>
+      </div>
+
+      {showSaveModal && (
+        <SavePatchModal
+          initialName={currentPatch.name}
+          initialDescription={currentPatch.description}
+          onClose={() => setShowSaveModal(false)}
+          onSaveNewPatch={handleSaveNewCustomPatch}
+        />
+      )}
+
+      {soundBrowserSlot !== null && currentPatch.layers[soundBrowserSlot] && (
+        <SoundBrowserModal
+          targetLayer={currentPatch.layers[soundBrowserSlot]}
+          customInstruments={customInstruments}
+          onClose={() => setSoundBrowserSlot(null)}
+          onAuditionSound={async (inst) => {
+            await ensureAudioStarted();
+            await audioEngine.previewInstrument(inst.id);
+          }}
+          onSelectSound={(slotIdx, inst) => {
+            updateLayer(slotIdx, {
+              instrumentId: inst.id,
+              enabled: true,
+              label: inst.name.split('|')[0].trim().split(' ').slice(0, 2).join(' '),
+            });
+          }}
+          onOpenImport={() => setActiveTab('import')}
+        />
+      )}
+    </div>
+  );
+}
