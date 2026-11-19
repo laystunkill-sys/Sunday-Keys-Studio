@@ -24,7 +24,7 @@ export function TopBar({
   onOpenSaveModal,
 }: TopBarProps) {
   return (
-    <header className="h-14 px-6 bg-[#0F1219] border-b border-white/[0.08] flex items-center justify-between gap-8 shrink-0">
+    <header className="h-11 px-4 bg-[#0F1219] border-b border-white/[0.08] flex items-center justify-between gap-4 shrink-0">
       {/* Zone 1: Single text wordmark */}
       <a
         href="#perform"
@@ -46,7 +46,7 @@ export function TopBar({
               key={item.id}
               type="button"
               onClick={() => onSelectTab(item.id)}
-              className={`relative py-4 text-sm font-medium transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60 ${
+              className={`relative py-3 text-sm font-medium transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60 ${
                 isActive ? 'text-amber-400' : 'text-slate-400 hover:text-slate-100'
               }`}
             >
@@ -65,7 +65,7 @@ export function TopBar({
           <button
             type="button"
             onClick={onStartAudio}
-            className="px-4 py-2 text-xs font-semibold bg-amber-500 text-slate-950 rounded-md hover:bg-amber-400 transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
+            className="px-3 py-1.5 text-xs font-semibold bg-amber-500 text-slate-950 rounded-md hover:bg-amber-400 transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
           >
             Enable Audio
           </button>
@@ -73,7 +73,7 @@ export function TopBar({
           <button
             type="button"
             onClick={onOpenSaveModal}
-            className="px-4 py-2 text-xs font-semibold bg-[#1E2330] text-slate-100 border border-white/[0.12] rounded-md hover:bg-[#272D3D] transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60"
+            className="px-3 py-1.5 text-xs font-semibold bg-[#1E2330] text-slate-100 border border-white/[0.12] rounded-md hover:bg-[#272D3D] transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60"
           >
             Save Patch
           </button>

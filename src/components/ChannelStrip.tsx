@@ -52,12 +52,17 @@ export function ChannelStrip({
 
   return (
     <div
-      className={`flex flex-col bg-[#141822] border rounded-lg p-3 transition-opacity ${
+      style={{
+        background: isAudible
+          ? `linear-gradient(180deg, #141822 40%, ${layer.color}26 100%)`
+          : undefined,
+      }}
+      className={`flex flex-col min-h-0 h-full bg-[#141822] border rounded-lg p-2 transition-opacity ${
         isAudible ? 'border-white/[0.09]' : 'border-white/[0.05] opacity-75'
       }`}
     >
-      {/* Top Strip Header */}
-      <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-white/[0.07]">
+      {/* Header: power + label + builder shortcut */}
+      <div className="flex items-center justify-between gap-1 pb-1.5 border-b border-white/[0.07] shrink-0">
         <button
           type="button"
           onClick={() => onUpdate({ enabled: !layer.enabled })}
@@ -77,78 +82,58 @@ export function ChannelStrip({
           type="button"
           onClick={() => onOpenBuilder(layer.slotIndex)}
           title="Edit Layer in Patch Builder"
-          className="p-1 text-slate-400 hover:text-amber-400 rounded transition-colors cursor-pointer shrink-0"
+          className="p-0.5 text-slate-400 hover:text-amber-400 rounded transition-colors cursor-pointer shrink-0"
         >
           <SlidersHorizontal className="w-3.5 h-3.5" />
         </button>
       </div>
 
-      {/* Sound Browser Trigger Button */}
-      <div className="mt-2.5 space-y-1">
+      {/* Sound picker + range/octave on one compact block */}
+      <div className="mt-1.5 shrink-0">
         <button
           type="button"
           onClick={() => onOpenSoundBrowser(layer.slotIndex)}
           title={`Browse sounds for Module ${layer.slotIndex + 1}`}
-          className="w-full bg-[#0D1017] hover:bg-[#171C28] border border-white/[0.09] hover:border-[#7FA4E8]/50 rounded px-2.5 py-1.5 text-xs text-slate-200 flex items-center justify-between gap-1.5 transition-colors cursor-pointer"
+          className="w-full bg-[#0D1017] hover:bg-[#171C28] border border-white/[0.09] hover:border-[#7FA4E8]/50 rounded px-2 py-1 text-xs text-slate-200 flex items-center justify-between gap-1.5 transition-colors cursor-pointer"
         >
           <span className="truncate">{inst?.name || layer.instrumentId}</span>
           <FolderSearch className="w-3.5 h-3.5 text-slate-400 shrink-0" />
         </button>
-
-        <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono-tabular px-0.5">
+        <div className="mt-0.5 flex items-center justify-between text-[10px] text-slate-400 font-mono-tabular px-0.5">
           <span>
             {midiToNoteName(layer.lowNote)}–{midiToNoteName(layer.highNote)}
           </span>
-          <span>
-            Oct {layer.octave > 0 ? `+${layer.octave}` : layer.octave}
-          </span>
+          <span>Oct {layer.octave > 0 ? `+${layer.octave}` : layer.octave}</span>
         </div>
       </div>
 
-      {/* Inline Tone / Reverb / Delay Mini Controls */}
-      <div className="mt-3 space-y-2 text-[11px]">
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-slate-400 w-10">Tone</span>
-          <input
-            type="range"
-            min={0}
-            max={100}
-            value={Math.round(layer.brightness * 100)}
-            onChange={(e) => onUpdate({ brightness: Number(e.target.value) / 100 })}
-            aria-label={`${layer.label} Tone Brightness`}
-            className="flex-1 h-1 accent-slate-300 cursor-pointer"
-          />
-        </div>
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-slate-400 w-10">Verb</span>
-          <input
-            type="range"
-            min={0}
-            max={100}
-            value={Math.round(layer.reverbSend * 100)}
-            onChange={(e) => onUpdate({ reverbSend: Number(e.target.value) / 100 })}
-            aria-label={`${layer.label} Reverb Send`}
-            className="flex-1 h-1 accent-sky-400 cursor-pointer"
-          />
-        </div>
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-slate-400 w-10">Delay</span>
-          <input
-            type="range"
-            min={0}
-            max={100}
-            value={Math.round(layer.delaySend * 100)}
-            onChange={(e) => onUpdate({ delaySend: Number(e.target.value) / 100 })}
-            aria-label={`${layer.label} Delay Send`}
-            className="flex-1 h-1 accent-violet-400 cursor-pointer"
-          />
-        </div>
+      {/* Tone / Verb / Delay: hidden automatically on short screens so the fader keeps its room */}
+      <div className="mt-1.5 space-y-1 text-[10px] shrink-0 [@media(max-height:520px)]:hidden">
+        {[
+          { label: 'Tone', value: layer.brightness, key: 'brightness', accent: 'accent-slate-300' },
+          { label: 'Verb', value: layer.reverbSend, key: 'reverbSend', accent: 'accent-sky-400' },
+          { label: 'Delay', value: layer.delaySend, key: 'delaySend', accent: 'accent-violet-400' },
+        ].map((ctl) => (
+          <div key={ctl.key} className="flex items-center gap-1.5">
+            <span className="text-slate-400 w-7 shrink-0">{ctl.label}</span>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={Math.round(ctl.value * 100)}
+              onChange={(e) =>
+                onUpdate({ [ctl.key]: Number(e.target.value) / 100 } as Partial<LayerConfig>)
+              }
+              aria-label={`${layer.label} ${ctl.label}`}
+              className={`flex-1 min-w-0 h-1 ${ctl.accent} cursor-pointer`}
+            />
+          </div>
+        ))}
       </div>
 
-      {/* Vertical Fader + LED Meter */}
-      <div className="mt-4 flex items-center justify-center gap-3 flex-1 min-h-[168px]">
-        {/* dB Scale */}
-        <div className="h-[156px] flex flex-col justify-between text-[10px] font-mono-tabular text-slate-500 text-right select-none">
+      {/* Vertical Fader + LED Meter: grows/shrinks with the screen height */}
+      <div className="mt-2 flex items-stretch justify-center gap-2 flex-1 min-h-[56px]">
+        <div className="flex flex-col justify-between text-[9px] font-mono-tabular text-slate-500 text-right select-none py-0.5">
           <span>0</span>
           <span>-6</span>
           <span>-12</span>
@@ -156,7 +141,6 @@ export function ChannelStrip({
           <span>-∞</span>
         </div>
 
-        {/* Fader Track */}
         <div
           ref={trackRef}
           onPointerDown={handlePointerDown}
@@ -176,10 +160,9 @@ export function ChannelStrip({
               onUpdate({ volume: Math.max(0, layer.volume - 0.05) });
             }
           }}
-          className="relative w-10 h-[156px] bg-[#0B0D12] border border-white/[0.08] rounded-md cursor-ns-resize select-none-touch flex justify-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60"
+          className="relative w-10 bg-[#0B0D12] border border-white/[0.08] rounded-md cursor-ns-resize select-none-touch flex justify-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60"
         >
-          {/* Center Slot Groove */}
-          <div className="w-1 h-[136px] my-auto bg-[#1E2432] rounded-full relative overflow-hidden">
+          <div className="w-1 h-[calc(100%-16px)] my-auto bg-[#1E2432] rounded-full relative overflow-hidden">
             <div
               className="absolute bottom-0 inset-x-0 rounded-full"
               style={{
@@ -190,7 +173,6 @@ export function ChannelStrip({
             />
           </div>
 
-          {/* Hardware Fader Cap */}
           <div
             className="absolute left-1 right-1 h-5 rounded bg-[#2A303E] border border-white/20 shadow-md flex items-center justify-center pointer-events-none"
             style={{
@@ -204,54 +186,45 @@ export function ChannelStrip({
           </div>
         </div>
 
-        {/* Real-time Audio Signal Meter */}
-        <div className="w-2.5 h-[156px] bg-[#0B0D12] border border-white/[0.06] rounded-sm overflow-hidden flex flex-col justify-end">
+        <div className="w-2 bg-[#0B0D12] border border-white/[0.06] rounded-sm overflow-hidden flex flex-col justify-end">
           <div
             className="w-full transition-[height] duration-75"
             style={{
               height: `${Math.min(100, Math.round(meterLevel * 100))}%`,
               background:
-                meterLevel > 0.85
-                  ? '#EF4444'
-                  : meterLevel > 0.6
-                    ? '#F59E0B'
-                    : '#10B981',
+                meterLevel > 0.85 ? '#EF4444' : meterLevel > 0.6 ? '#F59E0B' : '#10B981',
             }}
           />
         </div>
       </div>
 
-      {/* dB Readout + Mute / Solo */}
-      <div className="mt-3 pt-2.5 border-t border-white/[0.07] space-y-2">
-        <div className="flex items-center justify-between text-[11px] font-mono-tabular">
-          <span className="text-slate-400">{inst?.category.toUpperCase()}</span>
-          <span className="text-slate-200">{dbLabel}</span>
-        </div>
-
-        <div className="grid grid-cols-2 gap-1.5">
-          <button
-            type="button"
-            onClick={() => onUpdate({ muted: !layer.muted })}
-            className={`py-1.5 rounded text-xs font-bold transition-colors cursor-pointer ${
-              layer.muted
-                ? 'bg-rose-500/25 border border-rose-500/60 text-rose-300'
-                : 'bg-[#0D1017] border border-white/[0.08] text-slate-400 hover:text-slate-100'
-            }`}
-          >
-            M
-          </button>
-          <button
-            type="button"
-            onClick={() => onUpdate({ soloed: !layer.soloed })}
-            className={`py-1.5 rounded text-xs font-bold transition-colors cursor-pointer ${
-              layer.soloed
-                ? 'bg-amber-500/25 border border-amber-400/60 text-amber-300'
-                : 'bg-[#0D1017] border border-white/[0.08] text-slate-400 hover:text-slate-100'
-            }`}
-          >
-            S
-          </button>
-        </div>
+      {/* dB readout + Mute / Solo in a single row */}
+      <div className="mt-2 pt-1.5 border-t border-white/[0.07] shrink-0 flex items-center gap-1.5">
+        <span className="flex-1 text-[10px] font-mono-tabular text-slate-300 truncate">{dbLabel}</span>
+        <button
+          type="button"
+          onClick={() => onUpdate({ muted: !layer.muted })}
+          title="Mute"
+          className={`w-7 py-1 rounded text-[11px] font-bold transition-colors cursor-pointer ${
+            layer.muted
+              ? 'bg-rose-500/25 border border-rose-500/60 text-rose-300'
+              : 'bg-[#0D1017] border border-white/[0.08] text-slate-400 hover:text-slate-100'
+          }`}
+        >
+          M
+        </button>
+        <button
+          type="button"
+          onClick={() => onUpdate({ soloed: !layer.soloed })}
+          title="Solo"
+          className={`w-7 py-1 rounded text-[11px] font-bold transition-colors cursor-pointer ${
+            layer.soloed
+              ? 'bg-amber-500/25 border border-amber-400/60 text-amber-300'
+              : 'bg-[#0D1017] border border-white/[0.08] text-slate-400 hover:text-slate-100'
+          }`}
+        >
+          S
+        </button>
       </div>
     </div>
   );

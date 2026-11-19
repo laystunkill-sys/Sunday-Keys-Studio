@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Sunday Keys Studio</string>
+    <string name="title_activity_main">Sunday Keys Studio</string>
+    <string name="package_name">com.yourname.sundaykeys</string>
+    <string name="custom_url_scheme">com.yourname.sundaykeys</string>
+</resources>

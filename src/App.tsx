@@ -271,6 +271,19 @@ export default function App() {
     setAudioRunning(audioEngine.isRunning());
   }, []);
 
+  // Warm up audio on the very first interaction so the first chord isn't delayed
+useEffect(() => {
+  const warm = () => {
+    void ensureAudioStarted();
+  };
+  window.addEventListener('pointerdown', warm, { once: true });
+  window.addEventListener('keydown', warm, { once: true });
+  return () => {
+    window.removeEventListener('pointerdown', warm);
+    window.removeEventListener('keydown', warm);
+  };
+}, [ensureAudioStarted]);
+
   // Metering loop while audio engine is running
   useEffect(() => {
     if (!audioRunning) return;
@@ -763,9 +776,10 @@ export default function App() {
   );
 
   const anySoloed = currentPatch.layers.some((l) => l.soloed);
+  const [fxOpen, setFxOpen] = useState(false);
 
   return (
-    <div className="min-h-screen flex flex-col bg-[#0B0D12] text-[#F1F5F9]">
+    <div className="h-dvh overflow-hidden flex flex-col bg-[#0B0D12] text-[#F1F5F9]">
       <TopBar
         activeTab={activeTab}
         onSelectTab={setActiveTab}
@@ -774,7 +788,7 @@ export default function App() {
         onOpenSaveModal={() => setShowSaveModal(true)}
       />
 
-      <div className="flex-1 flex flex-col lg:flex-row min-h-0">
+      <div className="flex-1 flex flex-row min-h-0">
         {/* Left Setlist Sidebar */}
         <SetlistSidebar
           setlists={setlists}
@@ -796,6 +810,20 @@ export default function App() {
           onNewSong={handleNewSong}
           onNewSetlist={() => setSetlistEditor('new')}
           onEditSetlist={() => setSetlistEditor('edit')}
+          extra={
+            activeTab === 'perform' ? (
+              <TonicPadConsole
+                config={tonicPad}
+                songKey={currentKey}
+                onChange={async (patch) => {
+                  if (patch.active && !audioRunning) {
+                    await ensureAudioStarted();
+                  }
+                  setTonicPad((prev) => ({ ...prev, ...patch }));
+                }}
+              />
+            ) : undefined
+          }
         />
 
         {/* Main Workspace Area */}
@@ -827,14 +855,16 @@ export default function App() {
             onChangeMasterVolume={(masterVolume) =>
               updateActiveEffects({ masterVolume })
             }
+            fxOpen={fxOpen}
+            onToggleFx={() => setFxOpen((v) => !v)}
           />
 
           {/* View Content */}
-          <div className="flex-1 overflow-y-auto">
+          <div className={`flex-1 min-h-0 ${activeTab === 'perform' ? 'overflow-hidden' : 'overflow-y-auto'}`}>
             {activeTab === 'perform' && (
-              <div className="p-4 space-y-4">
+              <div className="h-full flex flex-col gap-2 p-2 relative">
                 {/* 5-Layer Real-Time Mixer */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-3">
+                <div className="flex-1 min-h-0 grid grid-cols-5 grid-rows-[minmax(0,1fr)] gap-2">
                   {currentPatch.layers.map((layer, idx) => (
                     <ChannelStrip
                       key={layer.slotIndex}
@@ -851,26 +881,18 @@ export default function App() {
                   ))}
                 </div>
 
-                {/* Tonic Pad & Master Effects Rack */}
-                <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-                  <TonicPadConsole
-                    config={tonicPad}
-                    songKey={currentKey}
-                    onChange={async (patch) => {
-                      if (patch.active && !audioRunning) {
-                        await ensureAudioStarted();
-                      }
-                      setTonicPad((prev) => ({ ...prev, ...patch }));
-                    }}
-                  />
-
-                  <EffectsRack
-                    effects={currentPatch.effects}
-                    modWheel={modWheel}
-                    onChangeModWheel={setModWheel}
-                    onChangeEffects={updateActiveEffects}
-                  />
-                </div>
+                {/* Master effects: opens from the FX button, like a drop-down panel */}
+                {fxOpen && (
+                  <>
+                    <div className="fixed inset-0 z-20" onClick={() => setFxOpen(false)} />
+                    <div className="absolute z-30 right-2 top-2 w-[min(600px,calc(100%-1rem))] shadow-2xl shadow-black/60">
+                      <EffectsRack
+                        effects={currentPatch.effects}
+                        onChangeEffects={updateActiveEffects}
+                      />
+                    </div>
+                  </>
+                )}
               </div>
             )}
 
@@ -974,6 +996,8 @@ export default function App() {
             onChangeBaseOctave={setBaseOctave}
             onNoteOn={handleNoteOn}
             onNoteOff={handleNoteOff}
+            modWheel={modWheel}
+            onChangeModWheel={setModWheel}
           />
         </main>
       </div>

@@ -1,3 +1,4 @@
+import { ReactNode } from 'react';
 import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, FilePlus2, ListPlus, Pencil, Plus, Trash2 } from 'lucide-react';
 import { getDiatonicWorshipChords } from '../data/instruments';
 import { Setlist, SetlistSong } from '../types/worship';
@@ -16,6 +17,7 @@ interface SetlistSidebarProps {
   onNewSong: () => void;
   onNewSetlist: () => void;
   onEditSetlist: () => void;
+  extra?: ReactNode;
 }
 
 export function SetlistSidebar({
@@ -32,59 +34,34 @@ export function SetlistSidebar({
   onNewSong,
   onNewSetlist,
   onEditSetlist,
+  extra,
 }: SetlistSidebarProps) {
   const activeSetlist = setlists.find((s) => s.id === activeSetlistId) || setlists[0];
   const songs = activeSetlist?.songs || [];
   const activeIndex = songs.findIndex((s) => s.id === activeSongId);
 
   return (
-    <aside className="w-full lg:w-[272px] bg-[#10131B] border-b lg:border-b-0 lg:border-r border-white/[0.08] flex flex-col shrink-0">
-      <div className="p-4 border-b border-white/[0.08] space-y-3">
-        <div className="flex items-center justify-between gap-2">
-          <h2 className="font-display text-sm font-semibold text-slate-100 tracking-tight">
-            Setlist Queue
-          </h2>
-          <div className="flex items-center gap-1">
-            <button
-              type="button"
-              onClick={() => onStepSong(-1)}
-              disabled={songs.length <= 1 || activeIndex <= 0}
-              title="Previous Song"
-              className="p-1.5 rounded bg-[#181C26] text-slate-300 hover:bg-[#222836] hover:text-white disabled:opacity-35 disabled:pointer-events-none transition-colors cursor-pointer"
-            >
-              <ChevronLeft className="w-4 h-4" />
-            </button>
-            <button
-              type="button"
-              onClick={() => onStepSong(1)}
-              disabled={songs.length <= 1 || activeIndex >= songs.length - 1}
-              title="Next Song"
-              className="p-1.5 rounded bg-[#181C26] text-slate-300 hover:bg-[#222836] hover:text-white disabled:opacity-35 disabled:pointer-events-none transition-colors cursor-pointer"
-            >
-              <ChevronRight className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-
+    <aside className="w-[220px] xl:w-[244px] min-h-0 bg-[#10131B] border-r border-white/[0.08] flex flex-col shrink-0">
+      <div className="p-2 border-b border-white/[0.08] space-y-1.5 shrink-0">
         <div className="flex items-center gap-1.5">
-        <select
-          value={activeSetlistId}
-          onChange={(e) => onSelectSetlist(e.target.value)}
-          aria-label="Active Setlist"
-          className="w-full bg-[#161A24] border border-white/[0.1] rounded-md px-3 py-2 text-xs font-medium text-slate-200 focus:outline-none focus:ring-2 focus:ring-amber-400/50 cursor-pointer"
-        >
-          {setlists.map((sl) => (
-            <option key={sl.id} value={sl.id}>
-              {sl.name}
-            </option>
-          ))}
-        </select>
+          <select
+            value={activeSetlistId}
+            onChange={(e) => onSelectSetlist(e.target.value)}
+            aria-label="Active Setlist"
+            className="flex-1 min-w-0 bg-[#161A24] border border-white/[0.1] rounded-md px-2 py-1.5 text-xs font-medium text-slate-200 focus:outline-none focus:ring-2 focus:ring-amber-400/50 cursor-pointer"
+          >
+            {setlists.map((sl) => (
+              <option key={sl.id} value={sl.id}>
+                {sl.name}
+              </option>
+            ))}
+          </select>
           <button
             type="button"
             onClick={onEditSetlist}
             title="Rename / delete this setlist"
             aria-label="Edit setlist"
-            className="p-2 rounded-md bg-[#161A24] border border-white/[0.1] text-slate-300 hover:text-amber-400 cursor-pointer"
+            className="p-1.5 rounded-md bg-[#161A24] border border-white/[0.1] text-slate-300 hover:text-amber-400 cursor-pointer"
           >
             <Pencil className="w-3.5 h-3.5" />
           </button>
@@ -93,17 +70,37 @@ export function SetlistSidebar({
             onClick={onNewSetlist}
             title="New setlist"
             aria-label="New setlist"
-            className="p-2 rounded-md bg-[#161A24] border border-white/[0.1] text-slate-300 hover:text-amber-400 cursor-pointer"
+            className="p-1.5 rounded-md bg-[#161A24] border border-white/[0.1] text-slate-300 hover:text-amber-400 cursor-pointer"
           >
             <ListPlus className="w-3.5 h-3.5" />
           </button>
         </div>
-        {activeSetlist && (
-          <p className="text-xs text-slate-400 truncate">{activeSetlist.serviceLabel}</p>
-        )}
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-[11px] text-slate-400 truncate">{activeSetlist?.serviceLabel}</p>
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              type="button"
+              onClick={() => onStepSong(-1)}
+              disabled={songs.length <= 1 || activeIndex <= 0}
+              title="Previous Song"
+              className="px-1.5 py-0.5 rounded bg-[#181C26] text-[11px] text-slate-300 hover:bg-[#222836] hover:text-white disabled:opacity-35 disabled:pointer-events-none cursor-pointer flex items-center"
+            >
+              <ChevronLeft className="w-3.5 h-3.5" /> Prev
+            </button>
+            <button
+              type="button"
+              onClick={() => onStepSong(1)}
+              disabled={songs.length <= 1 || activeIndex >= songs.length - 1}
+              title="Next Song"
+              className="px-1.5 py-0.5 rounded bg-[#181C26] text-[11px] text-slate-300 hover:bg-[#222836] hover:text-white disabled:opacity-35 disabled:pointer-events-none cursor-pointer flex items-center"
+            >
+              Next <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto divide-y divide-white/[0.06]">
+      <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-white/[0.06]">
         {songs.length === 0 ? (
           <div className="p-6 text-center space-y-2">
             <p className="text-xs text-slate-400">No songs in this setlist yet.</p>
@@ -114,7 +111,7 @@ export function SetlistSidebar({
             return (
               <div
                 key={song.id}
-                className={`group px-4 py-3 transition-colors ${
+                className={`group px-3 py-2 transition-colors ${
                   isSelected ? 'bg-[#1A202E]' : 'hover:bg-[#151923]'
                 }`}
               >
@@ -199,7 +196,7 @@ export function SetlistSidebar({
                 )}
 
                 {isSelected && song.notes && (
-                  <p className="mt-2 pl-6 text-xs text-slate-300/80 leading-relaxed">
+                  <p className="mt-1.5 pl-6 text-[11px] text-slate-300/80 leading-snug line-clamp-2">
                     {song.notes}
                   </p>
                 )}
@@ -209,11 +206,11 @@ export function SetlistSidebar({
         )}
       </div>
 
-      <div className="p-3 border-t border-white/[0.08] space-y-2">
+      <div className="p-2 border-t border-white/[0.08] shrink-0 grid grid-cols-2 gap-1.5">
         <button
           type="button"
           onClick={onNewSong}
-          className="w-full py-2 px-3 flex items-center justify-center gap-2 text-xs font-semibold bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-md transition-colors cursor-pointer"
+          className="py-1.5 px-2 flex items-center justify-center gap-1.5 text-xs font-semibold bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-md transition-colors cursor-pointer"
         >
           <FilePlus2 className="w-3.5 h-3.5" />
           <span>New Song</span>
@@ -221,12 +218,15 @@ export function SetlistSidebar({
         <button
           type="button"
           onClick={onAddCurrentToSetlist}
-          className="w-full py-2 px-3 flex items-center justify-center gap-2 text-xs font-medium bg-[#181C26] hover:bg-[#212736] text-slate-200 border border-white/[0.08] rounded-md transition-colors cursor-pointer"
+          title="Add the current patch to this setlist"
+          className="py-1.5 px-2 flex items-center justify-center gap-1.5 text-xs font-medium bg-[#181C26] hover:bg-[#212736] text-slate-200 border border-white/[0.08] rounded-md transition-colors cursor-pointer"
         >
           <Plus className="w-3.5 h-3.5 text-amber-400" />
-          <span>Add Current Patch to Setlist</span>
+          <span>Add Patch</span>
         </button>
       </div>
+
+      {extra && <div className="p-2 border-t border-white/[0.08] shrink-0">{extra}</div>}
     </aside>
   );
 }

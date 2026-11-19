@@ -47,10 +47,10 @@ interface VoiceRecord {
 // Hard cap on simultaneously sounding voices (held + still releasing).
 // Beyond this the oldest releasing voices are faded out quickly, which is what
 // stops fast chord changes from piling up and overloading the audio thread.
-const MAX_VOICES = 48;
+const MAX_VOICES = 96;
 // 'balanced' gives the audio thread more buffer headroom than 'interactive' (fewer crackles).
 // Switch to 'interactive' if you need the absolute lowest latency.
-const LATENCY_HINT: AudioContextLatencyCategory = 'balanced';
+const LATENCY_HINT: AudioContextLatencyCategory = 'interactive';
 
 function midiToFreq(midi: number): number {
   return 440 * Math.pow(2, (midi - 69) / 12);
@@ -244,7 +244,12 @@ export class WorshipAudioEngine {
       this.noiseBuffer = this.createNoiseBuffer();
       this.buildGraph();
     }
-    if (this.ctx.state === 'suspended') {
+    if (this.ctx.state === 'suspended') {{ await this.ctx.resume(); }
+    console.info(
+  '[audio] baseLatency(ms):', Math.round(this.ctx.baseLatency * 1000),
+  'outputLatency(ms):', Math.round((this.ctx.outputLatency || 0) * 1000),
+  'sampleRate:', this.ctx.sampleRate,
+);
       await this.ctx.resume();
     }
     // Ensure all registered custom audio samples are decoded
@@ -273,10 +278,10 @@ export class WorshipAudioEngine {
 
     this.masterCompressor = ctx.createDynamicsCompressor();
     this.masterCompressor.threshold.value = -12;
-    this.masterCompressor.knee.value = 18;
-    this.masterCompressor.ratio.value = 4;
-    this.masterCompressor.attack.value = 0.005;
-    this.masterCompressor.release.value = 0.15;
+    this.masterCompressor.knee.value = 30;
+    this.masterCompressor.ratio.value = 2.5;
+    this.masterCompressor.attack.value = 0.01;
+    this.masterCompressor.release.value = 0.25;
 
     this.masterGain = ctx.createGain();
     this.masterGain.gain.value = 0.85;
@@ -298,6 +303,15 @@ export class WorshipAudioEngine {
     this.masterLimiter.connect(this.masterGain);
     this.masterGain.connect(this.masterAnalyser);
     this.masterAnalyser.connect(ctx.destination);
+
+    // Inaudible tone that keeps the audio device from going to sleep
+    const keepAlive = ctx.createOscillator();
+    const keepAliveGain = ctx.createGain();
+    keepAlive.frequency.value = 30;
+    keepAliveGain.gain.value = 0.0002;
+    keepAlive.connect(keepAliveGain);
+    keepAliveGain.connect(ctx.destination);
+    keepAlive.start();
 
     // Build Cathedral Shimmer Reverb
     this.reverbInput = ctx.createGain();
@@ -515,7 +529,7 @@ export class WorshipAudioEngine {
       this.masterWarmthFilter.frequency.setTargetAtTime(freq, now, 0.04);
     }
     if (this.masterCompressor) {
-      this.masterCompressor.ratio.setTargetAtTime(fx.compressorEnabled ? 4.5 : 1, now, 0.05);
+      this.masterCompressor.ratio.setTargetAtTime(fx.compressorEnabled ? 2.5 : 1, now, 0.05);
     }
     if (this.reverbWetGain) {
       this.reverbWetGain.gain.setTargetAtTime(fx.reverbMix * 1.15, now, 0.04);
@@ -543,8 +557,10 @@ export class WorshipAudioEngine {
     }
     if (!this.ctx) return;
 
-    this.pressedNotes.set(midiNote, velocity);
-    this.sustainedNotes.delete(midiNote);
+    const alreadySounding =
+  this.pressedNotes.has(midiNote) || this.sustainedNotes.has(midiNote);
+this.pressedNotes.set(midiNote, velocity);
+this.sustainedNotes.delete(midiNote);
 
     const anySoloed = this.layers.some((l) => l.soloed);
 
@@ -557,7 +573,15 @@ export class WorshipAudioEngine {
       if (inst.sampleSet) void this.ensureSampleSet(inst.sampleSet);
       if (inst.isArp) return; // Arp notes are driven by the BPM scheduler while held in pressedNotes/sustainedNotes
 
-      this.triggerVoice(midiNote, velocity, layer, slotIdx);
+      // Pads/synths: a note that's already ringing keeps ringing (smooth chord changes)
+if (
+  alreadySounding &&
+  (inst.category === 'pad' || inst.category === 'synth') &&
+  this.activeVoices.has(`${slotIdx}:${midiNote}`)
+) {
+  return;
+}
+this.triggerVoice(midiNote, velocity, layer, slotIdx);
     });
   }
 
@@ -608,7 +632,7 @@ export class WorshipAudioEngine {
     this.liveVoices.forEach((v) => {
       if (!v.dead) alive++;
     });
-    return Math.min(1, Math.max(0.25, 1 - (alive - 16) / 48));
+    return Math.min(1, Math.max(0.6, 1 - (alive - 40) / 80));
   }
 
   private reserveVoiceSlot(): void {
@@ -619,7 +643,7 @@ export class WorshipAudioEngine {
     alive.sort((a, b) => Number(b.releasing) - Number(a.releasing) || a.start - b.start);
     for (let i = 0; i < excess; i++) {
       alive[i].dead = true;
-      alive[i].stop(0.03);
+      alive[i].stop(0.3);
     }
   }
 
@@ -669,7 +693,7 @@ export class WorshipAudioEngine {
     const velGain = 0.3 + velocity * 0.7;
     const multiSamples =
       !inst.isCustomSample && inst.sampleSet ? this.sampleSets.get(inst.sampleSet) : undefined;
-    const peakGain = (inst.isCustomSample ? 0.44 : multiSamples ? 0.55 : 0.28) * velGain;
+    const peakGain = (inst.isCustomSample ? 0.44 : multiSamples ? 0.55 : 0.28) * velGain * 0.75;
 
     const envGain = ctx.createGain();
     envGain.gain.setValueAtTime(0.0001, startTime);
@@ -704,7 +728,8 @@ export class WorshipAudioEngine {
     }
     envGain.connect(destination);
 
-    const attack = Math.max(0.004, inst.attack * attackScale);
+    const minAttack = inst.category === 'pad' || inst.category === 'synth' ? 0.03 : 0.004;
+    const attack = Math.max(minAttack, inst.attack * attackScale);
     const decay = Math.max(0.04, inst.decay);
     const sustainLevel = multiSamples ? 1 : Math.max(0.001, inst.sustain);
     const release = Math.max(0.04, inst.release * releaseScale);

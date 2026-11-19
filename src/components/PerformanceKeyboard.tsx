@@ -12,6 +12,8 @@ interface PerformanceKeyboardProps {
   onChangeBaseOctave: (oct: number) => void;
   onNoteOn: (midi: number, velocity?: number) => void;
   onNoteOff: (midi: number) => void;
+  modWheel: number;
+  onChangeModWheel: (val: number) => void;
 }
 
 const BLACK_NOTE_OFFSETS = new Set([1, 3, 6, 8, 10]);
@@ -25,9 +27,12 @@ export function PerformanceKeyboard({
   onChangeBaseOctave,
   onNoteOn,
   onNoteOff,
+  modWheel,
+  onChangeModWheel,
 }: PerformanceKeyboardProps) {
   const [latchedChordIdx, setLatchedChordIdx] = useState<number | null>(null);
   const [latchMode, setLatchMode] = useState(false);
+  const heldPadsRef = useRef<Set<number>>(new Set());
 
   const chordPads = useMemo(() => getDiatonicWorshipChords(songKey), [songKey]);
 
@@ -120,39 +125,62 @@ export function PerformanceKeyboard({
   };
 
   const handleChordPadDown = (idx: number) => {
-    const chord = chordPads[idx];
-    if (!chord) return;
+  const chord = chordPads[idx];
+  if (!chord) return;
 
-    if (latchMode) {
-      if (latchedChordIdx === idx) {
-        releaseLatchedChord();
-      } else {
-        releaseLatchedChord();
-        chord.midiNotes.forEach((n) => onNoteOn(n, 0.78));
-        setLatchedChordIdx(idx);
-      }
-      return;
+  if (latchMode) {
+    if (latchedChordIdx === idx) {
+      releaseLatchedChord();
+    } else {
+      // only change the notes that differ, so shared notes keep ringing
+      const prev = latchedChordIdx !== null ? chordPads[latchedChordIdx].midiNotes : [];
+      prev.filter((n) => !chord.midiNotes.includes(n)).forEach((n) => onNoteOff(n));
+      chord.midiNotes.filter((n) => !prev.includes(n)).forEach((n) => onNoteOn(n, 0.78));
+      setLatchedChordIdx(idx);
     }
+    return;
+  }
 
-    chord.midiNotes.forEach((n) => onNoteOn(n, 0.78));
-  };
+  heldPadsRef.current.add(idx);
+  chord.midiNotes.forEach((n) => onNoteOn(n, 0.78));
+};
 
-  const handleChordPadUp = (idx: number) => {
-    if (latchMode) return;
-    const chord = chordPads[idx];
-    chord?.midiNotes.forEach((n) => onNoteOff(n));
+const handleChordPadUp = (idx: number) => {
+  if (latchMode) return;
+  // ignore the duplicate pointerleave that fires right after pointerup
+  if (!heldPadsRef.current.delete(idx)) return;
+  const chord = chordPads[idx];
+  if (!chord) return;
+
+  // don't release notes that another still-held pad is playing
+  const stillHeld = new Set<number>();
+  heldPadsRef.current.forEach((i) =>
+    chordPads[i]?.midiNotes.forEach((n) => stillHeld.add(n)),
+  );
+  chord.midiNotes.filter((n) => !stillHeld.has(n)).forEach((n) => onNoteOff(n));
+};
+
+  const wheelRef = useRef<HTMLDivElement>(null);
+  const updateWheelFromPointer = (clientY: number) => {
+    const el = wheelRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    onChangeModWheel(Math.max(0, Math.min(1, 1 - (clientY - rect.top) / rect.height)));
   };
+  const modPercent = Math.round(modWheel * 100);
+
+  const activeLayers = layers.filter((l) => l.enabled && !l.muted);
 
   return (
     <section
       aria-label="Chord Pads and Playable Stage Keyboard"
-      className="bg-[#11141C] border-t border-white/[0.08] p-4 space-y-3 shrink-0"
+      className="bg-[#11141C] border-t border-white/[0.08] px-2 py-1.5 space-y-1.5 shrink-0"
     >
-      {/* Top Row: Diatonic Chord Trigger Pads + Octave & Latch Controls */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2 overflow-x-auto pb-1 sm:pb-0">
-          <span className="text-xs font-medium text-slate-400 mr-1 whitespace-nowrap">
-            Key of {songKey} Chords
+      {/* One row: chord pads, song progression, latch + octave */}
+      <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1 overflow-x-auto min-w-0 flex-1">
+          <span className="text-[11px] font-medium text-slate-400 mr-0.5 whitespace-nowrap">
+            Chords
           </span>
           {chordPads.map((chord, idx) => {
             const isLatched = latchedChordIdx === idx;
@@ -165,17 +193,17 @@ export function PerformanceKeyboard({
                 onPointerLeave={() => {
                   if (!latchMode) handleChordPadUp(idx);
                 }}
-                className={`px-3 py-1.5 rounded-md border text-left transition-colors select-none-touch cursor-pointer shrink-0 ${
+                className={`px-2 py-0.5 rounded-md border text-left transition-colors select-none-touch cursor-pointer shrink-0 ${
                   isLatched
                     ? 'bg-amber-500 text-slate-950 border-amber-400'
                     : 'bg-[#181D29] border-white/[0.08] text-slate-100 hover:border-amber-400/50 hover:bg-[#1F2636] active:bg-amber-500/25'
                 }`}
               >
-                <span className="font-mono-tabular text-xs font-semibold block leading-none">
+                <span className="font-mono-tabular text-[11px] font-semibold block leading-none">
                   {chord.label}
                 </span>
                 <span
-                  className={`text-[10px] font-mono-tabular block mt-0.5 leading-none ${
+                  className={`text-[9px] font-mono-tabular block mt-0.5 leading-none ${
                     isLatched ? 'text-slate-900' : 'text-slate-400'
                   }`}
                 >
@@ -184,25 +212,87 @@ export function PerformanceKeyboard({
               </button>
             );
           })}
+
+          {progression.length > 0 && (
+            <>
+              <span className="mx-1 h-6 w-px bg-white/[0.14] shrink-0" aria-hidden="true" />
+              <span className="text-[11px] font-medium text-slate-400 whitespace-nowrap">Song</span>
+              <button
+                type="button"
+                onClick={() => stepBy(-1)}
+                aria-label="Previous chord"
+                title="Previous chord (Left arrow)"
+                className="p-1 rounded bg-[#181D29] border border-white/[0.08] text-slate-300 hover:text-white cursor-pointer shrink-0"
+              >
+                <ChevronLeft className="w-3.5 h-3.5" />
+              </button>
+              {progression.map((chordIdx, pos) => {
+                const chord = chordPads[chordIdx];
+                if (!chord) return null;
+                const isActive = progStep === pos;
+                return (
+                  <button
+                    key={`${pos}-${chordIdx}`}
+                    type="button"
+                    onPointerDown={() => goToStep(pos)}
+                    className={`px-2 py-0.5 rounded-md border text-left transition-colors select-none-touch cursor-pointer shrink-0 ${
+                      isActive
+                        ? 'bg-amber-500 text-slate-950 border-amber-400'
+                        : 'bg-[#181D29] border-white/[0.08] text-slate-100 hover:border-amber-400/50'
+                    }`}
+                  >
+                    <span className="font-mono-tabular text-[11px] font-semibold block leading-none">
+                      {chord.label}
+                    </span>
+                    <span
+                      className={`text-[9px] font-mono-tabular block mt-0.5 leading-none ${
+                        isActive ? 'text-slate-900' : 'text-slate-500'
+                      }`}
+                    >
+                      {pos + 1}
+                    </span>
+                  </button>
+                );
+              })}
+              <button
+                type="button"
+                onClick={() => stepBy(1)}
+                aria-label="Next chord"
+                title="Next chord (Right arrow)"
+                className="p-1 rounded bg-[#181D29] border border-white/[0.08] text-slate-300 hover:text-white cursor-pointer shrink-0"
+              >
+                <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={releaseProgression}
+                aria-label="Release chord"
+                title="Release held chord"
+                className="p-1 rounded bg-[#181D29] border border-white/[0.08] text-slate-300 hover:text-rose-400 cursor-pointer shrink-0"
+              >
+                <Square className="w-3.5 h-3.5" />
+              </button>
+            </>
+          )}
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-1.5 shrink-0">
           <button
             type="button"
             onClick={() => {
               if (latchMode) releaseLatchedChord();
               setLatchMode(!latchMode);
             }}
-            className={`px-2.5 py-1.5 rounded text-xs font-medium border transition-colors cursor-pointer whitespace-nowrap ${
+            className={`px-2 py-1 rounded text-[11px] font-medium border transition-colors cursor-pointer whitespace-nowrap ${
               latchMode
                 ? 'bg-amber-500/20 border-amber-400/60 text-amber-300'
                 : 'bg-[#181D29] border-white/[0.08] text-slate-300 hover:text-white'
             }`}
           >
-            Chord Latch {latchMode ? 'On' : 'Off'}
+            Latch {latchMode ? 'On' : 'Off'}
           </button>
 
-          <div className="flex items-center gap-1 bg-[#181D29] border border-white/[0.08] rounded px-1.5 py-1">
+          <div className="flex items-center gap-0.5 bg-[#181D29] border border-white/[0.08] rounded px-1 py-0.5">
             <button
               type="button"
               onClick={() => onChangeBaseOctave(Math.max(1, baseOctave - 1))}
@@ -212,7 +302,7 @@ export function PerformanceKeyboard({
             >
               <ChevronLeft className="w-3.5 h-3.5" />
             </button>
-            <span className="font-mono-tabular text-xs text-slate-200 px-1 whitespace-nowrap">
+            <span className="font-mono-tabular text-[11px] text-slate-200 px-1 whitespace-nowrap">
               {midiToNoteName(startMidi)}–{midiToNoteName(startMidi + totalKeys - 1)}
             </span>
             <button
@@ -228,106 +318,73 @@ export function PerformanceKeyboard({
         </div>
       </div>
 
-      {/* Song Chord Progression */}
-      <div className="flex items-center gap-2 overflow-x-auto pb-1">
-        <span className="text-xs font-medium text-slate-400 whitespace-nowrap">Progression</span>
-        {progression.length === 0 ? (
-          <span className="text-xs text-slate-500 whitespace-nowrap">
-            None set for this song. Use the pencil next to the song in the Setlist panel.
-          </span>
-        ) : (
-          <>
-            <button
-              type="button"
-              onClick={() => stepBy(-1)}
-              aria-label="Previous chord"
-              title="Previous chord (Left arrow)"
-              className="p-1.5 rounded bg-[#181D29] border border-white/[0.08] text-slate-300 hover:text-white cursor-pointer shrink-0"
-            >
-              <ChevronLeft className="w-3.5 h-3.5" />
-            </button>
-            {progression.map((chordIdx, pos) => {
-              const chord = chordPads[chordIdx];
-              if (!chord) return null;
-              const isActive = progStep === pos;
-              return (
-                <button
-                  key={`${pos}-${chordIdx}`}
-                  type="button"
-                  onPointerDown={() => goToStep(pos)}
-                  className={`px-3 py-1.5 rounded-md border text-left transition-colors select-none-touch cursor-pointer shrink-0 ${
-                    isActive
-                      ? 'bg-amber-500 text-slate-950 border-amber-400'
-                      : 'bg-[#181D29] border-white/[0.08] text-slate-100 hover:border-amber-400/50'
-                  }`}
-                >
-                  <span className="font-mono-tabular text-xs font-semibold block leading-none">
-                    {chord.label}
-                  </span>
-                  <span
-                    className={`text-[10px] font-mono-tabular block mt-0.5 leading-none ${
-                      isActive ? 'text-slate-900' : 'text-slate-500'
-                    }`}
-                  >
-                    {pos + 1}
-                  </span>
-                </button>
-              );
-            })}
-            <button
-              type="button"
-              onClick={() => stepBy(1)}
-              aria-label="Next chord"
-              title="Next chord (Right arrow)"
-              className="p-1.5 rounded bg-[#181D29] border border-white/[0.08] text-slate-300 hover:text-white cursor-pointer shrink-0"
-            >
-              <ChevronRight className="w-3.5 h-3.5" />
-            </button>
-            <button
-              type="button"
-              onClick={releaseProgression}
-              aria-label="Release chord"
-              title="Release held chord"
-              className="p-1.5 rounded bg-[#181D29] border border-white/[0.08] text-slate-300 hover:text-rose-400 cursor-pointer shrink-0"
-            >
-              <Square className="w-3.5 h-3.5" />
-            </button>
-          </>
-        )}
-      </div>
+      {/* Mod wheel on the left, layer split bars + keys on the right (like the real app) */}
+      <div className="flex gap-2 items-stretch">
+        <div
+          ref={wheelRef}
+          onPointerDown={(e) => {
+            e.currentTarget.setPointerCapture(e.pointerId);
+            updateWheelFromPointer(e.clientY);
+          }}
+          onPointerMove={(e) => {
+            if (e.buttons === 0) return;
+            updateWheelFromPointer(e.clientY);
+          }}
+          role="slider"
+          title={`Mod wheel ${modPercent}%`}
+          aria-label="Mod Wheel Expression"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={modPercent}
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === 'ArrowUp') {
+              e.preventDefault();
+              onChangeModWheel(Math.min(1, modWheel + 0.05));
+            } else if (e.key === 'ArrowDown') {
+              e.preventDefault();
+              onChangeModWheel(Math.max(0, modWheel - 0.05));
+            }
+          }}
+          className="relative w-8 shrink-0 bg-[#0B0D12] border border-white/[0.1] rounded-md cursor-ns-resize select-none-touch overflow-hidden flex flex-col justify-end focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60"
+        >
+          <div
+            className="w-full bg-gradient-to-t from-amber-500/40 to-amber-400/80 transition-[height] duration-75"
+            style={{ height: `${modPercent}%` }}
+          />
+          <div
+            className="absolute left-0.5 right-0.5 h-3 bg-[#2A3140] border border-white/25 rounded-sm pointer-events-none"
+            style={{ bottom: `calc(${modPercent}% - ${modPercent * 0.12}px)` }}
+          />
+        </div>
 
-      {/* Layer Split Zone Indicator Strip */}
-      <div className="space-y-1">
-        {layers
-          .filter((l) => l.enabled && !l.muted)
-          .map((layer) => {
-            const minMidi = startMidi;
-            const maxMidi = startMidi + totalKeys - 1;
-            const clampedLow = Math.max(minMidi, layer.lowNote);
-            const clampedHigh = Math.min(maxMidi, layer.highNote);
-            if (clampedLow > maxMidi || clampedHigh < minMidi) return null;
-
-            const leftPct = ((clampedLow - minMidi) / totalKeys) * 100;
-            const widthPct = Math.max(2, ((clampedHigh - clampedLow + 1) / totalKeys) * 100);
-
-            return (
-              <div key={layer.slotIndex} className="relative h-2 w-full bg-[#0B0D12] rounded-sm overflow-hidden">
-                <div
-                  title={`${layer.label}: ${midiToNoteName(layer.lowNote)}–${midiToNoteName(layer.highNote)}`}
-                  className="absolute top-0 bottom-0 rounded-sm opacity-80"
-                  style={{
-                    left: `${leftPct}%`,
-                    width: `${widthPct}%`,
-                    backgroundColor: layer.color,
-                  }}
-                />
-              </div>
-            );
-          })}
-      </div>
+        <div className="flex-1 min-w-0 space-y-1">
+          {activeLayers.length > 0 && (
+            <div className="relative h-2 w-full bg-[#0B0D12] rounded-sm overflow-hidden flex flex-col gap-px">
+              {activeLayers.map((layer) => {
+                const minMidi = startMidi;
+                const maxMidi = startMidi + totalKeys - 1;
+                const clampedLow = Math.max(minMidi, layer.lowNote);
+                const clampedHigh = Math.min(maxMidi, layer.highNote);
+                if (clampedLow > maxMidi || clampedHigh < minMidi)
+                  return <div key={layer.slotIndex} className="flex-1" />;
+                const leftPct = ((clampedLow - minMidi) / totalKeys) * 100;
+                const widthPct = Math.max(2, ((clampedHigh - clampedLow + 1) / totalKeys) * 100);
+                return (
+                  <div key={layer.slotIndex} className="relative flex-1">
+                    <div
+                      title={`${layer.label}: ${midiToNoteName(layer.lowNote)}–${midiToNoteName(layer.highNote)}`}
+                      className="absolute inset-y-0 opacity-80"
+                      style={{ left: `${leftPct}%`, width: `${widthPct}%`, backgroundColor: layer.color }}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
       {/* Playable Piano Keys */}
-      <div className="relative h-28 select-none-touch bg-[#0A0C10] rounded-md border border-white/[0.08] overflow-hidden">
+      <div title="QWERTY: Z–M (lower), Q–I (upper), Space = Sustain" className="relative h-[clamp(60px,11vh,110px)] select-none-touch bg-[#0A0C10] rounded-md border border-white/[0.08] overflow-hidden">
         {/* White Keys */}
         <div className="flex h-full w-full">
           {whiteKeys.map((wk) => {
@@ -402,15 +459,7 @@ export function PerformanceKeyboard({
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400">
-        <span>
-          QWERTY Play: <span className="font-mono-tabular text-slate-300">Z–M</span> (lower) ·{' '}
-          <span className="font-mono-tabular text-slate-300">Q–I</span> (upper) ·{' '}
-          <span className="font-mono-tabular text-slate-300">Space</span> (Sustain)
-        </span>
-        <span>
-          Click or tap any chord pad above to audition layered worship swells
-        </span>
+        </div>
       </div>
     </section>
   );

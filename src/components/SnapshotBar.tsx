@@ -15,7 +15,7 @@ export function SnapshotBar({ snapshots, activeIndex, modified, onSelect, onSave
   return (
     <div
       aria-label="Snapshots"
-      className="flex items-stretch gap-2 px-4 py-2 bg-[#0F121A] border-t border-white/[0.08] shrink-0"
+      className="flex items-stretch gap-2 px-2 py-1.5 bg-[#0F121A] border-t border-white/[0.08] shrink-0"
     >
       <div className="flex-1 grid grid-cols-5 gap-2 min-w-0">
         {LABELS.map((label, idx) => {
@@ -27,7 +27,7 @@ export function SnapshotBar({ snapshots, activeIndex, modified, onSelect, onSave
               type="button"
               onClick={() => onSelect(idx)}
               title={isEmpty ? `Save current mix to ${label}` : `Recall ${label}`}
-              className={`relative px-2 py-2 rounded-md border text-center transition-colors cursor-pointer min-w-0 ${
+              className={`relative px-2 py-1.5 rounded-md border text-center transition-colors cursor-pointer min-w-0 ${
                 isActive
                   ? 'bg-[#6F8FD8]/80 border-[#9DB4EE] text-white'
                   : isEmpty
