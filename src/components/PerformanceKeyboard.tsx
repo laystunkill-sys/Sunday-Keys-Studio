@@ -1,10 +1,11 @@
-import { ChevronLeft, ChevronRight } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { ChevronLeft, ChevronRight, Square } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getDiatonicWorshipChords, midiToNoteName } from '../data/instruments';
 import { LayerConfig, MusicalKey } from '../types/worship';
 
 interface PerformanceKeyboardProps {
   songKey: MusicalKey;
+  progression?: number[];
   layers: LayerConfig[];
   activeNotes: Set<number>;
   baseOctave: number;
@@ -17,6 +18,7 @@ const BLACK_NOTE_OFFSETS = new Set([1, 3, 6, 8, 10]);
 
 export function PerformanceKeyboard({
   songKey,
+  progression: progressionProp,
   layers,
   activeNotes,
   baseOctave,
@@ -28,6 +30,67 @@ export function PerformanceKeyboard({
   const [latchMode, setLatchMode] = useState(false);
 
   const chordPads = useMemo(() => getDiatonicWorshipChords(songKey), [songKey]);
+
+  // ---- Song chord progression: step through it chord by chord ----
+  const progression = useMemo(() => progressionProp ?? [], [progressionProp]);
+  const progressionKey = progression.join(',');
+  const [progStep, setProgStep] = useState<number | null>(null);
+  const heldProgNotesRef = useRef<number[]>([]);
+
+  const releaseProgression = useCallback(() => {
+    heldProgNotesRef.current.forEach((n) => onNoteOff(n));
+    heldProgNotesRef.current = [];
+    setProgStep(null);
+  }, [onNoteOff]);
+
+  const goToStep = useCallback(
+    (step: number) => {
+      const chord = chordPads[progression[step]];
+      if (!chord) return;
+      const prev = heldProgNotesRef.current;
+      const next = chord.midiNotes;
+      // Notes shared with the previous chord keep ringing (smooth voice-leading, fewer voices)
+      prev.filter((n) => !next.includes(n)).forEach((n) => onNoteOff(n));
+      next.filter((n) => !prev.includes(n)).forEach((n) => onNoteOn(n, 0.78));
+      heldProgNotesRef.current = [...next];
+      setProgStep(step);
+    },
+    [chordPads, progression, onNoteOn, onNoteOff],
+  );
+
+  const stepBy = useCallback(
+    (dir: -1 | 1) => {
+      if (progression.length === 0) return;
+      const len = progression.length;
+      const target =
+        progStep === null ? (dir === 1 ? 0 : len - 1) : (progStep + dir + len) % len;
+      goToStep(target);
+    },
+    [progression.length, progStep, goToStep],
+  );
+
+  // Song or progression changed: let go of the held chord
+  useEffect(() => {
+    setProgStep(null);
+    return () => {
+      heldProgNotesRef.current.forEach((n) => onNoteOff(n));
+      heldProgNotesRef.current = [];
+    };
+  }, [songKey, progressionKey, onNoteOff]);
+
+  // Left / Right arrow keys step the progression (ignored while typing or in a dialog)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+      const el = e.target as HTMLElement | null;
+      if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return;
+      if (document.querySelector('[role="dialog"]')) return;
+      e.preventDefault();
+      stepBy(e.key === 'ArrowRight' ? 1 : -1);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [stepBy]);
 
   const startMidi = (baseOctave + 1) * 12; // e.g. baseOctave 2 -> C3 (48) or baseOctave 1 -> C2 (36)
   const totalKeys = 37; // 3 full octaves + top C
@@ -163,6 +226,74 @@ export function PerformanceKeyboard({
             </button>
           </div>
         </div>
+      </div>
+
+      {/* Song Chord Progression */}
+      <div className="flex items-center gap-2 overflow-x-auto pb-1">
+        <span className="text-xs font-medium text-slate-400 whitespace-nowrap">Progression</span>
+        {progression.length === 0 ? (
+          <span className="text-xs text-slate-500 whitespace-nowrap">
+            None set for this song. Use the pencil next to the song in the Setlist panel.
+          </span>
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={() => stepBy(-1)}
+              aria-label="Previous chord"
+              title="Previous chord (Left arrow)"
+              className="p-1.5 rounded bg-[#181D29] border border-white/[0.08] text-slate-300 hover:text-white cursor-pointer shrink-0"
+            >
+              <ChevronLeft className="w-3.5 h-3.5" />
+            </button>
+            {progression.map((chordIdx, pos) => {
+              const chord = chordPads[chordIdx];
+              if (!chord) return null;
+              const isActive = progStep === pos;
+              return (
+                <button
+                  key={`${pos}-${chordIdx}`}
+                  type="button"
+                  onPointerDown={() => goToStep(pos)}
+                  className={`px-3 py-1.5 rounded-md border text-left transition-colors select-none-touch cursor-pointer shrink-0 ${
+                    isActive
+                      ? 'bg-amber-500 text-slate-950 border-amber-400'
+                      : 'bg-[#181D29] border-white/[0.08] text-slate-100 hover:border-amber-400/50'
+                  }`}
+                >
+                  <span className="font-mono-tabular text-xs font-semibold block leading-none">
+                    {chord.label}
+                  </span>
+                  <span
+                    className={`text-[10px] font-mono-tabular block mt-0.5 leading-none ${
+                      isActive ? 'text-slate-900' : 'text-slate-500'
+                    }`}
+                  >
+                    {pos + 1}
+                  </span>
+                </button>
+              );
+            })}
+            <button
+              type="button"
+              onClick={() => stepBy(1)}
+              aria-label="Next chord"
+              title="Next chord (Right arrow)"
+              className="p-1.5 rounded bg-[#181D29] border border-white/[0.08] text-slate-300 hover:text-white cursor-pointer shrink-0"
+            >
+              <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={releaseProgression}
+              aria-label="Release chord"
+              title="Release held chord"
+              className="p-1.5 rounded bg-[#181D29] border border-white/[0.08] text-slate-300 hover:text-rose-400 cursor-pointer shrink-0"
+            >
+              <Square className="w-3.5 h-3.5" />
+            </button>
+          </>
+        )}
       </div>
 
       {/* Layer Split Zone Indicator Strip */}

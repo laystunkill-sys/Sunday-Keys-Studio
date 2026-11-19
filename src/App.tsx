@@ -8,12 +8,15 @@ import { PatchBuilderView } from './components/PatchBuilderView';
 import { PatchLibraryView } from './components/PatchLibraryView';
 import { PerformanceKeyboard } from './components/PerformanceKeyboard';
 import { SavePatchModal } from './components/SavePatchModal';
+import { SetlistEditorModal } from './components/SetlistEditorModal';
+import { SnapshotBar } from './components/SnapshotBar';
+import { SongEditorModal } from './components/SongEditorModal';
 import { SetlistSidebar } from './components/SetlistSidebar';
 import { SoundBrowserModal } from './components/SoundBrowserModal';
 import { TonicPadConsole } from './components/TonicPadConsole';
 import { TopBar } from './components/TopBar';
 import { TransportStageBar } from './components/TransportStageBar';
-import { CURATED_PATCHES, DEFAULT_SETLISTS } from './data/instruments';
+import { CURATED_PATCHES, DEFAULT_PROGRESSION, DEFAULT_SETLISTS } from './data/instruments';
 import { useMidi } from './hooks/useMidi';
 import {
   deleteCustomSound,
@@ -29,6 +32,7 @@ import {
   PatchCategory,
   Setlist,
   SetlistSong,
+  SongSnapshot,
   TimeSignature,
   TonicPadConfig,
   WorkspaceTab,
@@ -82,7 +86,18 @@ function loadInitialSetlists(): Setlist[] {
     const raw = localStorage.getItem(STORAGE_SETLISTS_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as Setlist[];
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        // Older saved setlists have no chord progression: fill in the starter one
+        const starters = new Map(
+          DEFAULT_SETLISTS.flatMap((sl) => sl.songs).map((s) => [s.id, s.chordProgression]),
+        );
+        return parsed.map((sl) => ({
+          ...sl,
+          songs: sl.songs.map((song) =>
+            song.chordProgression ? song : { ...song, chordProgression: starters.get(song.id) ?? [] },
+          ),
+        }));
+      }
     }
   } catch {
     // ignore storage errors
@@ -120,6 +135,9 @@ export default function App() {
   const [activeSongId, setActiveSongId] = useState<string>(
     () => loadInitialSetlists()[0].songs[0]?.id || '',
   );
+
+  const [songEditor, setSongEditor] = useState<{ song: SetlistSong; isNew: boolean } | null>(null);
+  const [setlistEditor, setSetlistEditor] = useState<'new' | 'edit' | null>(null);
 
   const [builderSlot, setBuilderSlot] = useState<number>(0);
   const [soundBrowserSlot, setSoundBrowserSlot] = useState<number | null>(null);
@@ -259,15 +277,51 @@ export default function App() {
     let rafId = 0;
     let lastUpdate = 0;
     const tick = (now: number) => {
-      if (now - lastUpdate > 40) {
+      if (now - lastUpdate > 60) {
         lastUpdate = now;
-        setMeters(audioEngine.getMeterLevels());
+        const next = audioEngine.getMeterLevels();
+        // Only re-render the app when a meter visibly moved
+        setMeters((prev) => {
+          const moved =
+            Math.abs(prev.master - next.master) > 0.02 ||
+            next.layers.some((v, i) => Math.abs((prev.layers[i] ?? 0) - v) > 0.02);
+          return moved ? next : prev;
+        });
       }
       rafId = requestAnimationFrame(tick);
     };
     rafId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafId);
   }, [audioRunning]);
+
+  // Batch the on-screen key highlight updates: a 6-note chord = 1 re-render instead of 6
+  const pendingNotesRef = useRef<{ add: Set<number>; remove: Set<number> }>({
+    add: new Set(),
+    remove: new Set(),
+  });
+  const flushRafRef = useRef(0);
+  const queueActiveNote = useCallback((midi: number, on: boolean) => {
+    const pending = pendingNotesRef.current;
+    if (on) {
+      pending.add.add(midi);
+      pending.remove.delete(midi);
+    } else {
+      pending.remove.add(midi);
+      pending.add.delete(midi);
+    }
+    if (flushRafRef.current) return;
+    flushRafRef.current = requestAnimationFrame(() => {
+      flushRafRef.current = 0;
+      const { add, remove } = pendingNotesRef.current;
+      pendingNotesRef.current = { add: new Set(), remove: new Set() };
+      setActiveNotes((prev) => {
+        const next = new Set(prev);
+        add.forEach((n) => next.add(n));
+        remove.forEach((n) => next.delete(n));
+        return next;
+      });
+    });
+  }, []);
 
   // Note triggers
   const handleNoteOn = useCallback(
@@ -276,24 +330,18 @@ export default function App() {
         await ensureAudioStarted();
       }
       await audioEngine.noteOn(midi, velocity);
-      setActiveNotes((prev) => {
-        const next = new Set(prev);
-        next.add(midi);
-        return next;
-      });
+      queueActiveNote(midi, true);
     },
-    [ensureAudioStarted],
+    [ensureAudioStarted, queueActiveNote],
   );
 
-  const handleNoteOff = useCallback((midi: number) => {
-    audioEngine.noteOff(midi);
-    setActiveNotes((prev) => {
-      if (!prev.has(midi)) return prev;
-      const next = new Set(prev);
-      next.delete(midi);
-      return next;
-    });
-  }, []);
+  const handleNoteOff = useCallback(
+    (midi: number) => {
+      audioEngine.noteOff(midi);
+      queueActiveNote(midi, false);
+    },
+    [queueActiveNote],
+  );
 
   const handleToggleSustain = useCallback((forceVal?: boolean) => {
     setSustainDown((prev) => {
@@ -419,6 +467,152 @@ export default function App() {
     },
     [activeSetlist.id, activeSongId],
   );
+
+  // ---- Snapshots (5 recallable mixer states per song) ----
+  const captureSnapshot = (patch: WorshipPatch): SongSnapshot => ({
+    layers: patch.layers.map((l) => ({ ...l })),
+    effects: { ...patch.effects },
+  });
+
+  const snapshotSlots: (SongSnapshot | null)[] = useMemo(() => {
+    const slots = activeSong?.snapshots ?? [];
+    return Array.from({ length: 5 }, (_, i) => slots[i] ?? null);
+  }, [activeSong?.snapshots]);
+  const activeSnapshotIdx = activeSong?.activeSnapshot ?? 0;
+
+  const snapshotModified = useMemo(() => {
+    const saved = snapshotSlots[activeSnapshotIdx];
+    if (!saved) return false;
+    return JSON.stringify(captureSnapshot(currentPatch)) !== JSON.stringify(saved);
+  }, [snapshotSlots, activeSnapshotIdx, currentPatch]);
+
+  const handleSelectSnapshot = useCallback(
+    (index: number) => {
+      updateActiveSong((song) => {
+        const active = song.activeSnapshot ?? 0;
+        if (index === active) return song;
+        const slots = Array.from({ length: 5 }, (_, i) => song.snapshots?.[i] ?? null);
+        // First time leaving Default: keep the current mix so it isn't lost
+        if (!slots[active]) slots[active] = captureSnapshot(song.patch);
+        const target = slots[index];
+        if (!target) {
+          // Empty slot: start it from the current mix
+          slots[index] = captureSnapshot(song.patch);
+          return { ...song, snapshots: slots, activeSnapshot: index };
+        }
+        return {
+          ...song,
+          snapshots: slots,
+          activeSnapshot: index,
+          patch: {
+            ...song.patch,
+            layers: target.layers.map((l) => ({ ...l })) as WorshipPatch['layers'],
+            effects: { ...target.effects },
+          },
+        };
+      });
+    },
+    [updateActiveSong],
+  );
+
+  const handleSaveSnapshot = useCallback(() => {
+    updateActiveSong((song) => {
+      const slots = Array.from({ length: 5 }, (_, i) => song.snapshots?.[i] ?? null);
+      slots[song.activeSnapshot ?? 0] = captureSnapshot(song.patch);
+      return { ...song, snapshots: slots };
+    });
+  }, [updateActiveSong]);
+
+  const handleEditSong = useCallback(
+    (songId: string) => {
+      const song = activeSetlist.songs.find((s) => s.id === songId);
+      if (song) setSongEditor({ song, isNew: false });
+    },
+    [activeSetlist.songs],
+  );
+
+  const handleNewSong = useCallback(() => {
+    setSongEditor({
+      isNew: true,
+      song: {
+        id: `song-${Date.now()}`,
+        title: 'New Song',
+        artist: '',
+        key: currentKey,
+        bpm: currentBpm,
+        timeSignature: currentTimeSig,
+        notes: '',
+        chordProgression: [...DEFAULT_PROGRESSION],
+        patch: clonePatch(currentPatch),
+      },
+    });
+  }, [currentBpm, currentKey, currentPatch, currentTimeSig]);
+
+  const handleSaveSong = useCallback(
+    (saved: SetlistSong, isNew: boolean) => {
+      // keep the patch in sync with the song's key / tempo / time signature
+      const song: SetlistSong = {
+        ...saved,
+        patch: { ...saved.patch, key: saved.key, bpm: saved.bpm, timeSignature: saved.timeSignature },
+      };
+      setSetlists((prev) =>
+        prev.map((sl) => {
+          if (sl.id !== activeSetlist.id) return sl;
+          return {
+            ...sl,
+            songs: isNew
+              ? [...sl.songs, song]
+              : sl.songs.map((s) => (s.id === song.id ? song : s)),
+          };
+        }),
+      );
+      setActiveSongId(song.id);
+      if (tonicPad.followSongKey) {
+        setTonicPad((prev) => ({ ...prev, key: song.key }));
+      }
+    },
+    [activeSetlist.id, tonicPad.followSongKey],
+  );
+
+  const handleSaveSetlist = useCallback(
+    (name: string, serviceLabel: string) => {
+      if (setlistEditor === 'new') {
+        const starter: SetlistSong = {
+          id: `song-${Date.now()}`,
+          title: 'New Song',
+          artist: '',
+          key: currentKey,
+          bpm: currentBpm,
+          timeSignature: currentTimeSig,
+          notes: '',
+          chordProgression: [...DEFAULT_PROGRESSION],
+          patch: clonePatch(currentPatch),
+        };
+        const created: Setlist = {
+          id: `setlist-${Date.now()}`,
+          name,
+          serviceLabel,
+          songs: [starter],
+        };
+        setSetlists((prev) => [...prev, created]);
+        setActiveSetlistId(created.id);
+        setActiveSongId(starter.id);
+      } else {
+        setSetlists((prev) =>
+          prev.map((sl) => (sl.id === activeSetlist.id ? { ...sl, name, serviceLabel } : sl)),
+        );
+      }
+    },
+    [activeSetlist.id, currentBpm, currentKey, currentPatch, currentTimeSig, setlistEditor],
+  );
+
+  const handleDeleteSetlist = useCallback(() => {
+    if (setlists.length <= 1) return;
+    const remaining = setlists.filter((sl) => sl.id !== activeSetlist.id);
+    setSetlists(remaining);
+    setActiveSetlistId(remaining[0].id);
+    setActiveSongId(remaining[0].songs[0]?.id || '');
+  }, [activeSetlist.id, setlists]);
 
   const handleAddPatchToSetlist = useCallback(
     (patch: WorshipPatch) => {
@@ -598,6 +792,10 @@ export default function App() {
           onMoveSong={handleMoveSong}
           onDeleteSong={handleDeleteSong}
           onAddCurrentToSetlist={() => handleAddPatchToSetlist(currentPatch)}
+          onEditSong={handleEditSong}
+          onNewSong={handleNewSong}
+          onNewSetlist={() => setSetlistEditor('new')}
+          onEditSetlist={() => setSetlistEditor('edit')}
         />
 
         {/* Main Workspace Area */}
@@ -756,9 +954,20 @@ export default function App() {
             )}
           </div>
 
+          {activeTab === 'perform' && (
+            <SnapshotBar
+              snapshots={snapshotSlots}
+              activeIndex={activeSnapshotIdx}
+              modified={snapshotModified}
+              onSelect={handleSelectSnapshot}
+              onSave={handleSaveSnapshot}
+            />
+          )}
+
           {/* Bottom Anchored Playable Stage Deck */}
           <PerformanceKeyboard
             songKey={currentKey}
+            progression={activeSong?.chordProgression}
             layers={currentPatch.layers}
             activeNotes={activeNotes}
             baseOctave={baseOctave}
@@ -768,6 +977,28 @@ export default function App() {
           />
         </main>
       </div>
+
+      {songEditor && (
+        <SongEditorModal
+          key={songEditor.song.id}
+          song={songEditor.song}
+          isNew={songEditor.isNew}
+          onSave={(song) => handleSaveSong(song, songEditor.isNew)}
+          onClose={() => setSongEditor(null)}
+        />
+      )}
+
+      {setlistEditor && (
+        <SetlistEditorModal
+          mode={setlistEditor}
+          initialName={setlistEditor === 'edit' ? activeSetlist.name : 'New Setlist'}
+          initialServiceLabel={setlistEditor === 'edit' ? activeSetlist.serviceLabel : ''}
+          canDelete={setlists.length > 1}
+          onSave={handleSaveSetlist}
+          onDelete={handleDeleteSetlist}
+          onClose={() => setSetlistEditor(null)}
+        />
+      )}
 
       {showSaveModal && (
         <SavePatchModal

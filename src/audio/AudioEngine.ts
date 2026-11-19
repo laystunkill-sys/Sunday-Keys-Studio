@@ -1,4 +1,5 @@
 import { INSTRUMENT_MAP, KEY_TO_SEMITONE } from '../data/instruments';
+import { SAMPLE_SETS, sampleUrl } from './sampleSets';
 import {
   DelaySubdivision,
   InstrumentPreset,
@@ -35,6 +36,21 @@ interface TonicVoiceSet {
   masterGain: GainNode;
   reverbSend: GainNode;
 }
+
+interface VoiceRecord {
+  start: number;
+  releasing: boolean;
+  dead: boolean; // stolen / force-faded
+  stop: (releaseSec?: number) => void;
+}
+
+// Hard cap on simultaneously sounding voices (held + still releasing).
+// Beyond this the oldest releasing voices are faded out quickly, which is what
+// stops fast chord changes from piling up and overloading the audio thread.
+const MAX_VOICES = 48;
+// 'balanced' gives the audio thread more buffer headroom than 'interactive' (fewer crackles).
+// Switch to 'interactive' if you need the absolute lowest latency.
+const LATENCY_HINT: AudioContextLatencyCategory = 'balanced';
 
 function midiToFreq(midi: number): number {
   return 440 * Math.pow(2, (midi - 69) / 12);
@@ -84,10 +100,15 @@ export class WorshipAudioEngine {
   private noiseBuffer: AudioBuffer | null = null;
 
   private activeVoices: Map<string, ActiveVoice> = new Map();
+  private liveVoices: Set<VoiceRecord> = new Set();
+  private driveCurves: Map<number, Float32Array<ArrayBuffer>> = new Map();
+  private masterLimiter: DynamicsCompressorNode | null = null;
   private activePreviewGain: GainNode | null = null;
   private customInstruments: Map<string, InstrumentPreset> = new Map();
   private rawSampleBuffers: Map<string, ArrayBuffer> = new Map();
   private decodedSampleBuffers: Map<string, AudioBuffer> = new Map();
+  private sampleSets: Map<string, Map<number, AudioBuffer>> = new Map();
+  private sampleSetLoading: Map<string, Promise<void>> = new Map();
   private pressedNotes: Map<number, number> = new Map(); // midi -> velocity
   private sustainedNotes: Set<number> = new Set();
   private sustainDown = false;
@@ -104,6 +125,52 @@ export class WorshipAudioEngine {
   private nextArpTime = 0;
   private arpStep = 0;
   private onBeatCallback: ((beat: number) => void) | null = null;
+
+  // Sampled pianos are much darker/duller through the synth-tuned filters, so open them up.
+  private effectiveCutoff(inst: InstrumentPreset): number {
+    return inst.sampleSet && !inst.isCustomSample ? inst.baseCutoffHz * 2.6 : inst.baseCutoffHz;
+  }
+
+  public isSampleSetLoaded(setId: string): boolean {
+    return this.sampleSets.has(setId);
+  }
+
+  // Fetch + decode every file of a multisample set once. Until it finishes,
+  // voices fall back to the built-in oscillator synth so keys are never silent.
+  public ensureSampleSet(setId: string): Promise<void> {
+    if (this.sampleSets.has(setId)) return Promise.resolve();
+    const inflight = this.sampleSetLoading.get(setId);
+    if (inflight) return inflight;
+    const def = SAMPLE_SETS[setId];
+    if (!def) return Promise.resolve();
+
+    const loading = (async () => {
+      const loaded = new Map<number, AudioBuffer>();
+      await Promise.all(
+        Object.entries(def.files).map(async ([midi, file]) => {
+          try {
+            const res = await fetch(sampleUrl(def, file));
+            if (!res.ok) return;
+            const raw = await res.arrayBuffer();
+            loaded.set(Number(midi), await this.decodeAudioDataSafe(raw));
+          } catch {
+            // missing/corrupt file: nearest-note lookup will use its neighbours
+          }
+        }),
+      );
+      if (loaded.size > 0) this.sampleSets.set(setId, loaded);
+    })().finally(() => this.sampleSetLoading.delete(setId));
+
+    this.sampleSetLoading.set(setId, loading);
+    return loading;
+  }
+
+  private preloadLayerSampleSets(): void {
+    this.layers.forEach((layer) => {
+      const inst = this.resolveInstrument(layer.instrumentId);
+      if (inst?.sampleSet) void this.ensureSampleSet(inst.sampleSet);
+    });
+  }
 
   public resolveInstrument(id: string): InstrumentPreset | undefined {
     return this.customInstruments.get(id) || INSTRUMENT_MAP[id];
@@ -173,7 +240,7 @@ export class WorshipAudioEngine {
   public async init(): Promise<void> {
     if (!this.ctx) {
       const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      this.ctx = new AudioCtx({ latencyHint: 'interactive' });
+      this.ctx = new AudioCtx({ latencyHint: LATENCY_HINT });
       this.noiseBuffer = this.createNoiseBuffer();
       this.buildGraph();
     }
@@ -192,6 +259,7 @@ export class WorshipAudioEngine {
       }
     }
     this.syncAllParameters();
+    this.preloadLayerSampleSets();
   }
 
   private buildGraph(): void {
@@ -218,7 +286,16 @@ export class WorshipAudioEngine {
     this.masterData = new Uint8Array(new ArrayBuffer(this.masterAnalyser.frequencyBinCount));
 
     this.masterWarmthFilter.connect(this.masterCompressor);
-    this.masterCompressor.connect(this.masterGain);
+    // Brick-wall style limiter so big stacked chords never clip (clipping = pops/"crazy" sound)
+    this.masterLimiter = ctx.createDynamicsCompressor();
+    this.masterLimiter.threshold.value = -4;
+    this.masterLimiter.knee.value = 0;
+    this.masterLimiter.ratio.value = 20;
+    this.masterLimiter.attack.value = 0.002;
+    this.masterLimiter.release.value = 0.12;
+
+    this.masterCompressor.connect(this.masterLimiter);
+    this.masterLimiter.connect(this.masterGain);
     this.masterGain.connect(this.masterAnalyser);
     this.masterAnalyser.connect(ctx.destination);
 
@@ -350,6 +427,7 @@ export class WorshipAudioEngine {
 
   public updateLayers(layers: LayerConfig[]): void {
     this.layers = layers.map((l) => ({ ...l }));
+    this.preloadLayerSampleSets();
     this.syncLayerStrips();
   }
 
@@ -404,7 +482,7 @@ export class WorshipAudioEngine {
 
       const isAudible = layer.enabled && !layer.muted && (!anySoloed || layer.soloed);
       const inst = this.resolveInstrument(layer.instrumentId);
-      const baseCut = inst ? inst.baseCutoffHz : 2500;
+      const baseCut = inst ? this.effectiveCutoff(inst) : 2500;
 
       // Mod wheel smoothly opens filter cutoff and adds subtle swell boost
       const modBoost = this.modWheel * layer.modWheelSensitivity;
@@ -443,15 +521,16 @@ export class WorshipAudioEngine {
       this.reverbWetGain.gain.setTargetAtTime(fx.reverbMix * 1.15, now, 0.04);
     }
     if (this.shimmerGain) {
-      this.shimmerGain.gain.setTargetAtTime(fx.shimmerAmount * 0.26, now, 0.05);
+      this.shimmerGain.gain.setTargetAtTime(Math.min(0.2, fx.shimmerAmount * 0.26), now, 0.05);
     }
     if (this.delayWetGain && this.delayL && this.delayR && this.delayFeedbackL && this.delayFeedbackR) {
       const quarterSec = 60 / this.bpm;
       const delayTime = Math.min(2.2, Math.max(0.06, quarterSec * getSubdivisionFactor(fx.delaySubdivision)));
       this.delayL.delayTime.setTargetAtTime(delayTime, now, 0.06);
       this.delayR.delayTime.setTargetAtTime(delayTime * 1.015, now, 0.06);
-      this.delayFeedbackL.gain.setTargetAtTime(fx.delayFeedback, now, 0.04);
-      this.delayFeedbackR.gain.setTargetAtTime(fx.delayFeedback, now, 0.04);
+      const safeFeedback = Math.min(0.8, fx.delayFeedback);
+      this.delayFeedbackL.gain.setTargetAtTime(safeFeedback, now, 0.04);
+      this.delayFeedbackR.gain.setTargetAtTime(safeFeedback, now, 0.04);
       this.delayWetGain.gain.setTargetAtTime(fx.delayMix * 0.9, now, 0.04);
     }
   }
@@ -475,6 +554,7 @@ export class WorshipAudioEngine {
 
       const inst = this.resolveInstrument(layer.instrumentId);
       if (!inst) return;
+      if (inst.sampleSet) void this.ensureSampleSet(inst.sampleSet);
       if (inst.isArp) return; // Arp notes are driven by the BPM scheduler while held in pressedNotes/sustainedNotes
 
       this.triggerVoice(midiNote, velocity, layer, slotIdx);
@@ -522,6 +602,27 @@ export class WorshipAudioEngine {
     }
   }
 
+  // Shorten releases when many voices are alive so old chords clear out quickly.
+  private releaseFactor(): number {
+    let alive = 0;
+    this.liveVoices.forEach((v) => {
+      if (!v.dead) alive++;
+    });
+    return Math.min(1, Math.max(0.25, 1 - (alive - 16) / 48));
+  }
+
+  private reserveVoiceSlot(): void {
+    const alive = Array.from(this.liveVoices).filter((v) => !v.dead);
+    const excess = alive.length - (MAX_VOICES - 1);
+    if (excess <= 0) return;
+    // releasing voices first, then oldest
+    alive.sort((a, b) => Number(b.releasing) - Number(a.releasing) || a.start - b.start);
+    for (let i = 0; i < excess; i++) {
+      alive[i].dead = true;
+      alive[i].stop(0.03);
+    }
+  }
+
   private createNoiseBuffer(): AudioBuffer {
     const ctx = this.ctx!;
     const length = Math.floor(ctx.sampleRate * 0.25);
@@ -534,6 +635,15 @@ export class WorshipAudioEngine {
   }
 
   private createDriveCurve(amount: number): Float32Array<ArrayBuffer> {
+    const key = Math.round(amount * 100);
+    const cached = this.driveCurves.get(key);
+    if (cached) return cached;
+    const curve = this.buildDriveCurve(amount);
+    this.driveCurves.set(key, curve);
+    return curve;
+  }
+
+  private buildDriveCurve(amount: number): Float32Array<ArrayBuffer> {
     const samples = 256;
     const curve = new Float32Array(new ArrayBuffer(samples * 4));
     const k = 1 + amount * 14;
@@ -555,8 +665,11 @@ export class WorshipAudioEngine {
     autoHoldSec?: number,
   ): { stop: (releaseOverride?: number) => void } {
     const ctx = this.ctx!;
+    this.reserveVoiceSlot();
     const velGain = 0.3 + velocity * 0.7;
-    const peakGain = (inst.isCustomSample ? 0.44 : 0.28) * velGain;
+    const multiSamples =
+      !inst.isCustomSample && inst.sampleSet ? this.sampleSets.get(inst.sampleSet) : undefined;
+    const peakGain = (inst.isCustomSample ? 0.44 : multiSamples ? 0.55 : 0.28) * velGain;
 
     const envGain = ctx.createGain();
     envGain.gain.setValueAtTime(0.0001, startTime);
@@ -564,14 +677,14 @@ export class WorshipAudioEngine {
     const voiceFilter = ctx.createBiquadFilter();
     voiceFilter.type = 'lowpass';
     voiceFilter.frequency.setValueAtTime(
-      Math.min(18000, inst.baseCutoffHz * (0.65 + velocity * 0.75)),
+      Math.min(18000, this.effectiveCutoff(inst) * (0.65 + velocity * 0.75)),
       startTime,
     );
     voiceFilter.Q.value = inst.resonance;
 
     // Optional Amplitude Tremolo Stage
-    const tremoloGain = ctx.createGain();
-    tremoloGain.gain.value = 1;
+    const tremoloGain = inst.tremoloRateHz && inst.tremoloDepth ? ctx.createGain() : null;
+    if (tremoloGain) tremoloGain.gain.value = 1;
 
     // Optional Warm Saturation Drive Stage
     let postFilterNode: AudioNode = voiceFilter;
@@ -583,13 +696,17 @@ export class WorshipAudioEngine {
       postFilterNode = shaper;
     }
 
-    postFilterNode.connect(tremoloGain);
-    tremoloGain.connect(envGain);
+    if (tremoloGain) {
+      postFilterNode.connect(tremoloGain);
+      tremoloGain.connect(envGain);
+    } else {
+      postFilterNode.connect(envGain);
+    }
     envGain.connect(destination);
 
     const attack = Math.max(0.004, inst.attack * attackScale);
     const decay = Math.max(0.04, inst.decay);
-    const sustainLevel = Math.max(0.001, inst.sustain);
+    const sustainLevel = multiSamples ? 1 : Math.max(0.001, inst.sustain);
     const release = Math.max(0.04, inst.release * releaseScale);
 
     envGain.gain.linearRampToValueAtTime(peakGain, startTime + attack);
@@ -643,6 +760,30 @@ export class WorshipAudioEngine {
       sampleSrc.connect(voiceFilter);
       sampleSrc.start(startTime, trimStart);
       oscs.push(sampleSrc);
+    } else if (multiSamples) {
+      // Multisample playback: nearest recorded note, pitch-shifted by a few semitones at most
+      const midiFloat = 69 + 12 * Math.log2(freq / 440);
+      let bestMidi = -1;
+      let bestDist = Infinity;
+      multiSamples.forEach((_buf, m) => {
+        const d = Math.abs(m - midiFloat);
+        if (d < bestDist) {
+          bestDist = d;
+          bestMidi = m;
+        }
+      });
+      const src = ctx.createBufferSource();
+      src.buffer = multiSamples.get(bestMidi)!;
+      src.playbackRate.setValueAtTime(freq / midiToFreq(bestMidi), startTime);
+      const loopDef = SAMPLE_SETS[inst.sampleSet!]?.loop;
+      if (loopDef && src.buffer) {
+        src.loop = true;
+        src.loopStart = src.buffer.duration * loopDef.start;
+        src.loopEnd = src.buffer.duration * loopDef.end;
+      }
+      src.connect(voiceFilter);
+      src.start(startTime);
+      oscs.push(src);
     } else {
       // Optional FM Modulator (for DX7 / Bell / Synth Keys)
       let fmModOsc: OscillatorNode | null = null;
@@ -687,7 +828,7 @@ export class WorshipAudioEngine {
     }
 
     // Optional Felt Mechanical Hammer Thump Noise (for Felt Piano & Flannel Swarm)
-    if (inst.feltNoiseAmount && inst.feltNoiseAmount > 0 && this.noiseBuffer) {
+    if (!multiSamples && inst.feltNoiseAmount && inst.feltNoiseAmount > 0 && this.noiseBuffer) {
       const noiseSrc = ctx.createBufferSource();
       noiseSrc.buffer = this.noiseBuffer;
 
@@ -708,7 +849,7 @@ export class WorshipAudioEngine {
     }
 
     // Optional crisp acoustic hammer strike transient
-    if (inst.hammerTransient && inst.hammerTransient > 0) {
+    if (!multiSamples && inst.hammerTransient && inst.hammerTransient > 0) {
       const clickOsc = ctx.createOscillator();
       clickOsc.type = 'triangle';
       clickOsc.frequency.setValueAtTime(freq * 4.5, startTime);
@@ -739,7 +880,7 @@ export class WorshipAudioEngine {
 
     // Optional Amplitude Tremolo LFO (Rhodes / Wurli / Vibes)
     let tremLfo: OscillatorNode | null = null;
-    if (inst.tremoloRateHz && inst.tremoloDepth) {
+    if (tremoloGain && inst.tremoloRateHz && inst.tremoloDepth) {
       tremLfo = ctx.createOscillator();
       tremLfo.type = 'sine';
       tremLfo.frequency.value = inst.tremoloRateHz;
@@ -794,14 +935,26 @@ export class WorshipAudioEngine {
     }
 
     let stopped = false;
+    const rec: VoiceRecord = { start: startTime, releasing: false, dead: false, stop: () => {} };
+    this.liveVoices.add(rec);
     const stop = (releaseScaleOverride?: number) => {
       if (stopped) return;
       stopped = true;
+      rec.releasing = true;
       const stopTime = Math.max(ctx.currentTime, startTime);
-      const rel = releaseScaleOverride !== undefined ? releaseScaleOverride : release;
-      envGain.gain.cancelScheduledValues(stopTime);
-      envGain.gain.setValueAtTime(Math.max(0.0001, envGain.gain.value), stopTime);
-      envGain.gain.exponentialRampToValueAtTime(0.0001, stopTime + rel);
+      const rel =
+        releaseScaleOverride !== undefined
+          ? releaseScaleOverride
+          : Math.max(0.05, release * this.releaseFactor());
+      // cancelAndHoldAtTime freezes the envelope at its current value (no jump = no click)
+      const gainParam = envGain.gain as AudioParam & { cancelAndHoldAtTime?: (t: number) => void };
+      if (typeof gainParam.cancelAndHoldAtTime === 'function') {
+        gainParam.cancelAndHoldAtTime(stopTime);
+      } else {
+        gainParam.cancelScheduledValues(stopTime);
+        gainParam.setValueAtTime(Math.max(0.0001, gainParam.value), stopTime);
+      }
+      gainParam.exponentialRampToValueAtTime(0.0001, stopTime + rel);
 
       if (swarmGain) {
         swarmGain.gain.cancelScheduledValues(stopTime);
@@ -829,6 +982,7 @@ export class WorshipAudioEngine {
 
       const cleanupDelayMs = Math.max(200, (end - ctx.currentTime + 0.1) * 1000);
       window.setTimeout(() => {
+        this.liveVoices.delete(rec);
         try {
           envGain.disconnect();
           voiceFilter.disconnect();
@@ -878,6 +1032,7 @@ export class WorshipAudioEngine {
         }
       });
       window.setTimeout(() => {
+        this.liveVoices.delete(rec);
         try {
           envGain.disconnect();
           voiceFilter.disconnect();
@@ -887,6 +1042,7 @@ export class WorshipAudioEngine {
       }, (end - ctx.currentTime + 0.15) * 1000);
     }
 
+    rec.stop = stop;
     return { stop };
   }
 
@@ -1219,6 +1375,8 @@ export class WorshipAudioEngine {
 
     const inst = this.resolveInstrument(instrumentId);
     if (!inst) return;
+
+    if (inst.sampleSet) await this.ensureSampleSet(inst.sampleSet);
 
     const ctx = this.ctx;
     const now = ctx.currentTime;

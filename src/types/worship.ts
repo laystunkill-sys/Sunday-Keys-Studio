@@ -75,6 +75,7 @@ export interface InstrumentPreset {
   isArp?: boolean;
   arpSubdivision?: '1/8' | '1/16';
   arpPattern?: number[]; // semitone offsets
+  sampleSet?: string; // id of a multisample set in audio/sampleSets.ts
   isCustomSample?: boolean;
   sampleRootMidi?: number;
   sampleTrimStartSec?: number;
@@ -138,6 +139,12 @@ export interface WorshipPatch {
   isCustom?: boolean;
 }
 
+// A recallable mixer state: sounds, levels, mutes, pans, sends and master effects.
+export interface SongSnapshot {
+  layers: LayerConfig[];
+  effects: MasterEffectsConfig;
+}
+
 export interface SetlistSong {
   id: string;
   title: string;
@@ -146,6 +153,10 @@ export interface SetlistSong {
   bpm: number;
   timeSignature: TimeSignature;
   notes: string;
+  // Order the chords are played in: indices into getDiatonicWorshipChords(key) (0..7)
+  chordProgression?: number[];
+  snapshots?: (SongSnapshot | null)[]; // 5 slots; slot 0 is "Default"
+  activeSnapshot?: number;
   patch: WorshipPatch;
 }
 

@@ -1,3 +1,4 @@
+import { EXTRA_PRESETS } from './extraPresets';
 import {
   InstrumentPreset,
   LayerConfig,
@@ -1631,6 +1632,15 @@ export const INSTRUMENTS: InstrumentPreset[] = [
   },
 ];
 
+INSTRUMENTS.push(...EXTRA_PRESETS);
+
+// Acoustic pianos use the recorded multisample set instead of oscillators.
+INSTRUMENTS.forEach((inst) => {
+  if (inst.category === 'piano' && inst.soundType === 'Acoustic Piano') {
+    inst.sampleSet = 'grand';
+  }
+});
+
 export const INSTRUMENT_MAP: Record<string, InstrumentPreset> = Object.fromEntries(
   INSTRUMENTS.map((inst) => [inst.id, inst]),
 );
@@ -2060,3 +2070,20 @@ export const DEFAULT_SETLISTS: Setlist[] = [
     ],
   },
 ];
+
+// Starter chord progressions (indices into getDiatonicWorshipChords: 0=I 1=vi7 2=IV2 3=V 4=I/3 5=ii7 6=V/7 7=IVmaj7)
+export const DEFAULT_PROGRESSION = [0, 3, 1, 2]; // I - V - vi - IV
+const STARTER_PROGRESSIONS: Record<string, number[]> = {
+  'song-1': [0, 3, 1, 2],
+  'song-2': [1, 2, 0, 3],
+  'song-3': [0, 2, 1, 3],
+  'song-4': [0, 4, 2, 3],
+  'yn-1': [0, 3, 1, 2],
+  'yn-2': [1, 2, 0, 3],
+  'yn-3': [0, 7, 5, 3],
+};
+DEFAULT_SETLISTS.forEach((sl) =>
+  sl.songs.forEach((song) => {
+    song.chordProgression = STARTER_PROGRESSIONS[song.id] ?? DEFAULT_PROGRESSION;
+  }),
+);

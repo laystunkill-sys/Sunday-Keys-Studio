@@ -1,4 +1,5 @@
-import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Plus, Trash2 } from 'lucide-react';
+import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, FilePlus2, ListPlus, Pencil, Plus, Trash2 } from 'lucide-react';
+import { getDiatonicWorshipChords } from '../data/instruments';
 import { Setlist, SetlistSong } from '../types/worship';
 
 interface SetlistSidebarProps {
@@ -11,6 +12,10 @@ interface SetlistSidebarProps {
   onMoveSong: (songId: string, direction: -1 | 1) => void;
   onDeleteSong: (songId: string) => void;
   onAddCurrentToSetlist: () => void;
+  onEditSong: (songId: string) => void;
+  onNewSong: () => void;
+  onNewSetlist: () => void;
+  onEditSetlist: () => void;
 }
 
 export function SetlistSidebar({
@@ -23,6 +28,10 @@ export function SetlistSidebar({
   onMoveSong,
   onDeleteSong,
   onAddCurrentToSetlist,
+  onEditSong,
+  onNewSong,
+  onNewSetlist,
+  onEditSetlist,
 }: SetlistSidebarProps) {
   const activeSetlist = setlists.find((s) => s.id === activeSetlistId) || setlists[0];
   const songs = activeSetlist?.songs || [];
@@ -57,6 +66,7 @@ export function SetlistSidebar({
           </div>
         </div>
 
+        <div className="flex items-center gap-1.5">
         <select
           value={activeSetlistId}
           onChange={(e) => onSelectSetlist(e.target.value)}
@@ -69,6 +79,25 @@ export function SetlistSidebar({
             </option>
           ))}
         </select>
+          <button
+            type="button"
+            onClick={onEditSetlist}
+            title="Rename / delete this setlist"
+            aria-label="Edit setlist"
+            className="p-2 rounded-md bg-[#161A24] border border-white/[0.1] text-slate-300 hover:text-amber-400 cursor-pointer"
+          >
+            <Pencil className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={onNewSetlist}
+            title="New setlist"
+            aria-label="New setlist"
+            className="p-2 rounded-md bg-[#161A24] border border-white/[0.1] text-slate-300 hover:text-amber-400 cursor-pointer"
+          >
+            <ListPlus className="w-3.5 h-3.5" />
+          </button>
+        </div>
         {activeSetlist && (
           <p className="text-xs text-slate-400 truncate">{activeSetlist.serviceLabel}</p>
         )}
@@ -116,7 +145,19 @@ export function SetlistSidebar({
                     </div>
                   </button>
 
-                  <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity shrink-0">
+                  <div
+                    className={`flex items-center gap-0.5 focus-within:opacity-100 transition-opacity shrink-0 ${
+                      isSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => onEditSong(song.id)}
+                      title="Edit song & chord progression"
+                      className="p-1 text-slate-400 hover:text-amber-400 cursor-pointer"
+                    >
+                      <Pencil className="w-3.5 h-3.5" />
+                    </button>
                     <button
                       type="button"
                       onClick={() => onMoveSong(song.id, -1)}
@@ -148,6 +189,15 @@ export function SetlistSidebar({
                   </div>
                 </div>
 
+                {song.chordProgression && song.chordProgression.length > 0 && (
+                  <p className="mt-1.5 pl-6 text-[11px] text-amber-300/80 font-mono-tabular truncate">
+                    {song.chordProgression
+                      .map((i) => getDiatonicWorshipChords(song.key)[i]?.label)
+                      .filter(Boolean)
+                      .join(' · ')}
+                  </p>
+                )}
+
                 {isSelected && song.notes && (
                   <p className="mt-2 pl-6 text-xs text-slate-300/80 leading-relaxed">
                     {song.notes}
@@ -159,7 +209,15 @@ export function SetlistSidebar({
         )}
       </div>
 
-      <div className="p-3 border-t border-white/[0.08]">
+      <div className="p-3 border-t border-white/[0.08] space-y-2">
+        <button
+          type="button"
+          onClick={onNewSong}
+          className="w-full py-2 px-3 flex items-center justify-center gap-2 text-xs font-semibold bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-md transition-colors cursor-pointer"
+        >
+          <FilePlus2 className="w-3.5 h-3.5" />
+          <span>New Song</span>
+        </button>
         <button
           type="button"
           onClick={onAddCurrentToSetlist}
