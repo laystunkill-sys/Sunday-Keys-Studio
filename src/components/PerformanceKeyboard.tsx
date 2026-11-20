@@ -190,6 +190,7 @@ const handleChordPadUp = (idx: number) => {
                 type="button"
                 onPointerDown={() => handleChordPadDown(idx)}
                 onPointerUp={() => handleChordPadUp(idx)}
+                onPointerCancel={() => handleChordPadUp(idx)}
                 onPointerLeave={() => {
                   if (!latchMode) handleChordPadUp(idx);
                 }}
@@ -400,9 +401,10 @@ const handleChordPadUp = (idx: number) => {
                   onNoteOn(wk.midi, relY);
                 }}
                 onPointerUp={() => onNoteOff(wk.midi)}
-                onPointerLeave={() => {
-                  if (activeNotes.has(wk.midi)) onNoteOff(wk.midi);
-                }}
+                onPointerCancel={() => onNoteOff(wk.midi)}
+onPointerLeave={(e) => {
+  if (e.buttons !== 0) onNoteOff(wk.midi);
+}}
                 aria-label={`Play ${wk.label}`}
                 className={`flex-1 h-full border-r border-slate-300/20 last:border-r-0 relative flex items-end justify-center pb-1.5 transition-colors cursor-pointer ${
                   isActive
@@ -442,8 +444,9 @@ const handleChordPadUp = (idx: number) => {
                   e.stopPropagation();
                   onNoteOff(k.midi);
                 }}
-                onPointerLeave={() => {
-                  if (activeNotes.has(k.midi)) onNoteOff(k.midi);
+                onPointerCancel={() => onNoteOff(k.midi)}
+                onPointerLeave={(e) => {
+                if (e.buttons !== 0) onNoteOff(k.midi);
                 }}
                 aria-label={`Play ${k.label}`}
                 style={{

@@ -18,6 +18,7 @@ import { TopBar } from './components/TopBar';
 import { TransportStageBar } from './components/TransportStageBar';
 import { CURATED_PATCHES, DEFAULT_PROGRESSION, DEFAULT_SETLISTS } from './data/instruments';
 import { useMidi } from './hooks/useMidi';
+import { LayerEditorModal } from './components/LayerEditorModal';
 import {
   deleteCustomSound,
   loadAllCustomSounds,
@@ -141,6 +142,7 @@ export default function App() {
 
   const [builderSlot, setBuilderSlot] = useState<number>(0);
   const [soundBrowserSlot, setSoundBrowserSlot] = useState<number | null>(null);
+  const [editorSlot, setEditorSlot] = useState<number | null>(null);
   const [showSaveModal, setShowSaveModal] = useState(false);
   const [customSounds, setCustomSounds] = useState<StoredCustomSound[]>([]);
 
@@ -224,9 +226,23 @@ export default function App() {
   );
 
   // Sync audio engine with current patch & transport state
-  useEffect(() => {
-    audioEngine.updateLayers(currentPatch.layers);
-  }, [currentPatch.layers]);
+ // Ease into the new song's layer settings instead of jumping
+const prevSongIdRef = useRef(activeSong?.id);
+useEffect(() => {
+  const songChanged = prevSongIdRef.current !== activeSong?.id;
+  prevSongIdRef.current = activeSong?.id;
+  audioEngine.updateLayers(currentPatch.layers, songChanged ? 0.9 : 0);
+}, [currentPatch.layers, activeSong?.id]);
+
+// Pre-load the sounds of the previous / next song
+useEffect(() => {
+  const songs = activeSetlist?.songs ?? [];
+  const idx = songs.findIndex((s) => s.id === activeSong?.id);
+  if (idx === -1) return;
+  [songs[idx - 1], songs[idx + 1]].forEach((s) => {
+    if (s) audioEngine.prefetchLayers(s.patch.layers);
+  });
+}, [activeSetlist?.songs, activeSong?.id]);
 
   useEffect(() => {
     audioEngine.updateEffects(currentPatch.effects);
@@ -337,24 +353,33 @@ useEffect(() => {
   }, []);
 
   // Note triggers
-  const handleNoteOn = useCallback(
-    async (midi: number, velocity = 0.8) => {
-      if (!audioEngine.isRunning()) {
-        await ensureAudioStarted();
-      }
-      await audioEngine.noteOn(midi, velocity);
-      queueActiveNote(midi, true);
-    },
-    [ensureAudioStarted, queueActiveNote],
-  );
+ const downNotesRef = useRef<Set<number>>(new Set());
 
-  const handleNoteOff = useCallback(
-    (midi: number) => {
-      audioEngine.noteOff(midi);
-      queueActiveNote(midi, false);
-    },
-    [queueActiveNote],
-  );
+const handleNoteOn = useCallback(
+  async (midi: number, velocity = 0.8) => {
+    downNotesRef.current.add(midi);
+    if (!audioEngine.isRunning()) {
+      await ensureAudioStarted();
+    }
+    if (!downNotesRef.current.has(midi)) return; // released before the audio was ready
+    await audioEngine.noteOn(midi, velocity);
+    if (!downNotesRef.current.has(midi)) {
+      audioEngine.noteOff(midi); // released while the note was still starting
+      return;
+    }
+    queueActiveNote(midi, true);
+  },
+  [ensureAudioStarted, queueActiveNote],
+);
+
+const handleNoteOff = useCallback(
+  (midi: number) => {
+    downNotesRef.current.delete(midi);
+    audioEngine.noteOff(midi);
+    queueActiveNote(midi, false);
+  },
+  [queueActiveNote],
+);
 
   const handleToggleSustain = useCallback((forceVal?: boolean) => {
     setSustainDown((prev) => {
@@ -711,64 +736,72 @@ useEffect(() => {
     setCustomSounds((prev) => prev.filter((s) => s.id !== id));
   }, []);
 
-  // QWERTY Keyboard Playability + Spacebar Sustain
-  const pressedKeysRef = useRef<Set<string>>(new Set());
+ // QWERTY Keyboard Playability + Spacebar Sustain
+const pressedKeysRef = useRef<Map<string, number>>(new Map());
 
-  useEffect(() => {
-    const isInputFocused = (target: EventTarget | null): boolean => {
-      if (!(target instanceof HTMLElement)) return false;
-      const tag = target.tagName.toLowerCase();
-      return tag === 'input' || tag === 'textarea' || tag === 'select';
-    };
+useEffect(() => {
+  const isInputFocused = (target: EventTarget | null): boolean => {
+    if (!(target instanceof HTMLElement)) return false;
+    const tag = target.tagName.toLowerCase();
+    return tag === 'input' || tag === 'textarea' || tag === 'select';
+  };
 
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (isInputFocused(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
-      if (e.repeat) return;
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (isInputFocused(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.repeat) return;
 
-      if (e.code === 'Space') {
-        e.preventDefault();
-        handleToggleSustain(true);
-        return;
-      }
-      if (e.key === '[') {
-        handleStepSong(-1);
-        return;
-      }
-      if (e.key === ']') {
-        handleStepSong(1);
-        return;
-      }
+    if (e.code === 'Space') {
+      e.preventDefault();
+      handleToggleSustain(true);
+      return;
+    }
+    if (e.key === '[') {
+      handleStepSong(-1);
+      return;
+    }
+    if (e.key === ']') {
+      handleStepSong(1);
+      return;
+    }
 
-      const key = e.key.toLowerCase();
-      if (key in QWERTY_OFFSET_MAP && !pressedKeysRef.current.has(key)) {
-        pressedKeysRef.current.add(key);
-        const startMidi = (baseOctave + 1) * 12;
-        const midi = startMidi + QWERTY_OFFSET_MAP[key];
-        void handleNoteOn(midi, 0.8);
-      }
-    };
+    const key = e.key.toLowerCase();
+    if (key in QWERTY_OFFSET_MAP && !pressedKeysRef.current.has(key)) {
+      const midi = (baseOctave + 1) * 12 + QWERTY_OFFSET_MAP[key];
+      pressedKeysRef.current.set(key, midi); // remember which note this key started
+      void handleNoteOn(midi, 0.8);
+    }
+  };
 
-    const onKeyUp = (e: KeyboardEvent) => {
-      if (e.code === 'Space') {
-        handleToggleSustain(false);
-        return;
-      }
-      const key = e.key.toLowerCase();
-      if (key in QWERTY_OFFSET_MAP && pressedKeysRef.current.has(key)) {
-        pressedKeysRef.current.delete(key);
-        const startMidi = (baseOctave + 1) * 12;
-        const midi = startMidi + QWERTY_OFFSET_MAP[key];
-        handleNoteOff(midi);
-      }
-    };
+  const onKeyUp = (e: KeyboardEvent) => {
+    if (e.code === 'Space') {
+      handleToggleSustain(false);
+      return;
+    }
+    const key = e.key.toLowerCase();
+    const midi = pressedKeysRef.current.get(key);
+    if (midi !== undefined) {
+      pressedKeysRef.current.delete(key);
+      handleNoteOff(midi);
+    }
+  };
 
-    window.addEventListener('keydown', onKeyDown);
-    window.addEventListener('keyup', onKeyUp);
-    return () => {
-      window.removeEventListener('keydown', onKeyDown);
-      window.removeEventListener('keyup', onKeyUp);
-    };
-  }, [baseOctave, handleNoteOff, handleNoteOn, handleStepSong, handleToggleSustain]);
+  // If the window loses focus, the browser never sends the key-up: let go of everything
+  const releaseAllKeys = () => {
+    pressedKeysRef.current.forEach((midi) => handleNoteOff(midi));
+    pressedKeysRef.current.clear();
+  };
+
+  window.addEventListener('keydown', onKeyDown);
+  window.addEventListener('keyup', onKeyUp);
+  window.addEventListener('blur', releaseAllKeys);
+  document.addEventListener('visibilitychange', releaseAllKeys);
+  return () => {
+    window.removeEventListener('keydown', onKeyDown);
+    window.removeEventListener('keyup', onKeyUp);
+    window.removeEventListener('blur', releaseAllKeys);
+    document.removeEventListener('visibilitychange', releaseAllKeys);
+  };
+}, [baseOctave, handleNoteOff, handleNoteOn, handleStepSong, handleToggleSustain]);
 
   const allPatches = useMemo(
     () => [...customPatches, ...CURATED_PATCHES],
@@ -862,7 +895,7 @@ useEffect(() => {
           {/* View Content */}
           <div className={`flex-1 min-h-0 ${activeTab === 'perform' ? 'overflow-hidden' : 'overflow-y-auto'}`}>
             {activeTab === 'perform' && (
-              <div className="h-full flex flex-col gap-2 p-2 relative">
+              <div key={activeSong?.id} className="song-fade h-full flex flex-col gap-2 p-2 relative">
                 {/* 5-Layer Real-Time Mixer */}
                 <div className="flex-1 min-h-0 grid grid-cols-5 grid-rows-[minmax(0,1fr)] gap-2">
                   {currentPatch.layers.map((layer, idx) => (
@@ -872,10 +905,7 @@ useEffect(() => {
                       meterLevel={meters.layers[idx] || 0}
                       anySoloed={anySoloed}
                       onUpdate={(patch) => updateLayer(layer.slotIndex, patch)}
-                      onOpenBuilder={(slotIdx) => {
-                        setBuilderSlot(slotIdx);
-                        setActiveTab('builder');
-                      }}
+                      onOpenBuilder={(slotIdx) => setEditorSlot(slotIdx)}
                       onOpenSoundBrowser={(slotIdx) => setSoundBrowserSlot(slotIdx)}
                     />
                   ))}
@@ -1033,6 +1063,15 @@ useEffect(() => {
         />
       )}
 
+{editorSlot !== null && currentPatch.layers[editorSlot] && (
+  <LayerEditorModal
+    layer={currentPatch.layers[editorSlot]}
+    onUpdate={(patch) => updateLayer(editorSlot, patch)}
+    onClose={() => setEditorSlot(null)}
+    onBrowseSounds={() => { setSoundBrowserSlot(editorSlot); setEditorSlot(null); }}
+    onOpenPatchBuilder={() => { setBuilderSlot(editorSlot); setActiveTab('builder'); setEditorSlot(null); }}
+  />
+)}
       {soundBrowserSlot !== null && currentPatch.layers[soundBrowserSlot] && (
         <SoundBrowserModal
           targetLayer={currentPatch.layers[soundBrowserSlot]}

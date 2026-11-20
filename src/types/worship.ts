@@ -18,7 +18,7 @@ export type DelaySubdivision = '1/4' | '1/8.' | '1/8' | '1/16';
 
 export type InstrumentCategory = 'piano' | 'pad' | 'synth' | 'bass' | 'arp';
 
-export type TonicPresetId = 'warm-analog' | 'shimmer-cathedral' | 'deep-sub' | 'glassy-air';
+export type TonicPresetId = string; // ids live in data/tonicPresets.ts
 
 export type WorkspaceTab = 'perform' | 'builder' | 'library' | 'import' | 'midi';
 

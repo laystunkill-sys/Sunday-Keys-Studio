@@ -1,3 +1,4 @@
+import { getTonicPreset } from '../data/tonicPresets';
 import { INSTRUMENT_MAP, KEY_TO_SEMITONE } from '../data/instruments';
 import { SAMPLE_SETS, sampleUrl } from './sampleSets';
 import {
@@ -439,10 +440,29 @@ export class WorshipAudioEngine {
     return impulse;
   }
 
-  public updateLayers(layers: LayerConfig[]): void {
+  private layerGlideTc = 0.025;
+  private layerGlideTimer: number | undefined;
+ 
+  // glideSec > 0 makes the strips ease into the new settings (used when the song changes)
+  public updateLayers(layers: LayerConfig[], glideSec = 0): void {
     this.layers = layers.map((l) => ({ ...l }));
+    this.layerGlideTc = glideSec > 0 ? glideSec / 3 : 0.025;
+    window.clearTimeout(this.layerGlideTimer);
+    if (glideSec > 0) {
+      this.layerGlideTimer = window.setTimeout(() => {
+        this.layerGlideTc = 0.025;
+      }, glideSec * 1000 + 100);
+    }
     this.preloadLayerSampleSets();
-    this.syncLayerStrips();
+    this.syncLayerStrips(); 
+  }
+ 
+  // Start loading the samples for a patch before it is selected (next / previous song)
+  public prefetchLayers(layers: LayerConfig[]): void {
+    layers.forEach((layer) => {
+      const inst = this.resolveInstrument(layer.instrumentId);
+      if (inst?.sampleSet) void this.ensureSampleSet(inst.sampleSet);
+    });
   }
 
   public updateEffects(effects: MasterEffectsConfig): void {
@@ -507,11 +527,11 @@ export class WorshipAudioEngine {
       const swellGain = 1 - layer.modWheelSensitivity * 0.25 + modBoost * 0.35;
       const targetGain = isAudible ? Math.max(0, Math.min(1.2, layer.volume * swellGain)) : 0;
 
-      strip.gain.gain.setTargetAtTime(targetGain, now, 0.025);
-      strip.filter.frequency.setTargetAtTime(targetCutoff, now, 0.03);
+      strip.gain.gain.setTargetAtTime(targetGain, now, this.layerGlideTc);
+      strip.filter.frequency.setTargetAtTime(targetCutoff, now, Math.max(0.03, this.layerGlideTc));
       strip.pan.pan.setTargetAtTime(layer.pan, now, 0.02);
-      strip.reverbSend.gain.setTargetAtTime(layer.reverbSend * 0.9, now, 0.03);
-      strip.delaySend.gain.setTargetAtTime(layer.delaySend * 0.85, now, 0.03);
+      strip.reverbSend.gain.setTargetAtTime(layer.reverbSend * 0.9, now, Math.max(0.03, this.layerGlideTc));
+      strip.delaySend.gain.setTargetAtTime(layer.delaySend * 0.85, now, Math.max(0.03, this.layerGlideTc));
     });
   }
 
@@ -585,13 +605,14 @@ this.triggerVoice(midiNote, velocity, layer, slotIdx);
     });
   }
 
-  public noteOff(midiNote: number): void {
-    this.pressedNotes.delete(midiNote);
-    if (this.sustainDown) {
-      this.sustainedNotes.add(midiNote);
-      return;
-    }
-    this.releaseVoicesForNote(midiNote);
+ public noteOff(midiNote: number): void {
+  const wasHeld = this.pressedNotes.delete(midiNote);
+  if (this.sustainDown) {
+    // Only keep notes that were really pressed; stray releases must not become ghost notes
+    if (wasHeld) this.sustainedNotes.add(midiNote);
+    return;
+  }
+  this.releaseVoicesForNote(midiNote);
   }
 
   public setSustain(down: boolean): void {
@@ -1157,18 +1178,10 @@ this.triggerVoice(midiNote, velocity, layer, slotIdx);
   }
 
   private getTonicCutoff(preset: TonicPresetId, brightness: number): number {
-    switch (preset) {
-      case 'warm-analog':
-        return 260 + brightness * 1400;
-      case 'shimmer-cathedral':
-        return 420 + brightness * 2400;
-      case 'deep-sub':
-        return 180 + brightness * 700;
-      case 'glassy-air':
-        return 600 + brightness * 2800;
-    }
+    const p = getTonicPreset(preset);
+    return p.cutoffBase + brightness * p.cutoffRange;
   }
-
+ 
   private createTonicVoice(
     key: MusicalKey,
     preset: TonicPresetId,
@@ -1178,68 +1191,39 @@ this.triggerVoice(midiNote, velocity, layer, slotIdx);
     const ctx = this.ctx!;
     const now = ctx.currentTime;
     const baseMidi = 36 + KEY_TO_SEMITONE[key]; // C2 range
-
+    const def = getTonicPreset(preset);
+ 
     const filter = ctx.createBiquadFilter();
     filter.type = 'lowpass';
     filter.frequency.setValueAtTime(this.getTonicCutoff(preset, brightness), now);
-    filter.Q.value = preset === 'shimmer-cathedral' ? 1.4 : 0.8;
-
+    filter.Q.value = def.q;
+ 
     const masterGain = ctx.createGain();
     masterGain.gain.setValueAtTime(0.0001, now);
     masterGain.gain.linearRampToValueAtTime(Math.max(0.001, volume * 0.24), now + 1.2);
-
+ 
     const reverbSend = ctx.createGain();
-    reverbSend.gain.value = preset === 'deep-sub' ? 0.45 : 0.85;
-
+    reverbSend.gain.value = def.reverb;
+ 
     filter.connect(masterGain);
     masterGain.connect(this.masterWarmthFilter!);
     masterGain.connect(reverbSend);
     reverbSend.connect(this.reverbInput!);
-
+ 
     // LFO breathing filter sweep
     const lfo = ctx.createOscillator();
     lfo.type = 'sine';
     lfo.frequency.value = 0.14;
     const lfoGain = ctx.createGain();
-    lfoGain.gain.value = preset === 'deep-sub' ? 90 : 240;
+    lfoGain.gain.value = def.lfoDepth;
     lfo.connect(lfoGain);
     lfoGain.connect(filter.frequency);
     lfo.start(now);
-
-    const partials: { semi: number; detune: number; type: OscillatorType; gain: number }[] =
-      preset === 'deep-sub'
-        ? [
-            { semi: 0, detune: 0, type: 'sine', gain: 0.55 },
-            { semi: 12, detune: -6, type: 'triangle', gain: 0.3 },
-            { semi: 12, detune: 6, type: 'sawtooth', gain: 0.18 },
-            { semi: 19, detune: 0, type: 'sine', gain: 0.2 },
-          ]
-        : preset === 'glassy-air'
-          ? [
-              { semi: 12, detune: -8, type: 'triangle', gain: 0.35 },
-              { semi: 12, detune: 8, type: 'triangle', gain: 0.35 },
-              { semi: 19, detune: 3, type: 'sine', gain: 0.28 },
-              { semi: 24, detune: -4, type: 'sine', gain: 0.25 },
-            ]
-          : preset === 'shimmer-cathedral'
-            ? [
-                { semi: 0, detune: 0, type: 'sine', gain: 0.38 },
-                { semi: 12, detune: -10, type: 'sawtooth', gain: 0.26 },
-                { semi: 12, detune: 10, type: 'sawtooth', gain: 0.26 },
-                { semi: 19, detune: 4, type: 'triangle', gain: 0.24 },
-                { semi: 24, detune: -5, type: 'sine', gain: 0.22 },
-              ]
-            : [
-                { semi: 0, detune: 0, type: 'sine', gain: 0.42 },
-                { semi: 12, detune: -9, type: 'sawtooth', gain: 0.26 },
-                { semi: 12, detune: 9, type: 'sawtooth', gain: 0.26 },
-                { semi: 19, detune: 0, type: 'triangle', gain: 0.22 },
-              ];
-
+ 
     const oscillators: OscillatorNode[] = [];
     const gains: GainNode[] = [];
-
-    partials.forEach((p) => {
+ 
+    def.partials.forEach((p) => {
       const osc = ctx.createOscillator();
       osc.type = p.type;
       osc.frequency.setValueAtTime(midiToFreq(baseMidi + p.semi), now);
@@ -1252,7 +1236,7 @@ this.triggerVoice(midiNote, velocity, layer, slotIdx);
       oscillators.push(osc);
       gains.push(g);
     });
-
+ 
     return { oscillators, gains, lfo, lfoGain, filter, masterGain, reverbSend };
   }
 

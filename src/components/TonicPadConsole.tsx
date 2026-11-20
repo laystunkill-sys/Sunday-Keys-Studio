@@ -1,5 +1,6 @@
 import { Power } from 'lucide-react';
 import { MUSICAL_KEYS } from '../data/instruments';
+import { TONIC_PRESETS } from '../data/tonicPresets';
 import { MusicalKey, TonicPadConfig, TonicPresetId } from '../types/worship';
 
 interface TonicPadConsoleProps {
@@ -7,13 +8,6 @@ interface TonicPadConsoleProps {
   songKey: MusicalKey;
   onChange: (patch: Partial<TonicPadConfig>) => void;
 }
-
-const TONIC_PRESETS: { id: TonicPresetId; label: string }[] = [
-  { id: 'warm-analog', label: 'Warm Analog' },
-  { id: 'shimmer-cathedral', label: 'Shimmer Cathedral' },
-  { id: 'deep-sub', label: 'Deep Sub' },
-  { id: 'glassy-air', label: 'Glassy Air' },
-];
 
 export function TonicPadConsole({ config, songKey, onChange }: TonicPadConsoleProps) {
   return (
@@ -61,9 +55,10 @@ export function TonicPadConsole({ config, songKey, onChange }: TonicPadConsolePr
           aria-label="Tonic Pad Tone Preset"
           className="flex-1 min-w-0 bg-[#0D1017] border border-white/[0.08] rounded px-2 py-1 text-xs text-slate-200 focus:outline-none focus:ring-1 focus:ring-amber-400/60 cursor-pointer"
         >
-          {TONIC_PRESETS.map((p) => (
+          {TONIC_PRESETS.map((p, i) => (
             <option key={p.id} value={p.id}>
-              {p.label}
+              {i + 1}. {p.label}
+              {p.low ? ' (low)' : ''}
             </option>
           ))}
         </select>
