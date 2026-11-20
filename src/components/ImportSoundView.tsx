@@ -16,6 +16,13 @@ import {
   detectRootMidiFromFilename,
   StoredCustomSound,
 } from '../storage/customSoundStore';
+import {
+  detectRootFromAudio,
+  findLoopPoints,
+  findExtensionLoop,
+  validateImportDuration,
+  validateImportFile,
+} from '../storage/sampleAnalysis';
 import { InstrumentCategory, InstrumentPreset, LayerConfig } from '../types/worship';
 
 interface ImportSoundViewProps {
@@ -194,9 +201,15 @@ export function ImportSoundView({
 
     let lastImportedId: string | null = null;
     let importedCount = 0;
+    let sustainNote = '';
 
     try {
       for (const file of Array.from(files)) {
+        const sizeErr = validateImportFile(file);
+        if (sizeErr) {
+          setErrorMessage(sizeErr);
+          continue;
+        }
         const arrayBuffer = await file.arrayBuffer();
         let decoded: AudioBuffer;
         try {
@@ -208,11 +221,33 @@ export function ImportSoundView({
           continue;
         }
 
+        const durErr = validateImportDuration(decoded, file.name);
+        if (durErr) {
+          setErrorMessage(durErr);
+          continue;
+        }
+
         const id = `user-sample-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-        const rootMidi = detectRootMidiFromFilename(file.name);
         const trimStartSec = detectLeadingSilenceSec(decoded);
+        const pitch = detectRootFromAudio(decoded, trimStartSec);
+        const rootMidi = Math.min(
+          84,
+          Math.max(
+            24,
+            pitch && pitch.confidence >= 0.5
+              ? pitch.midi
+              : detectRootMidiFromFilename(file.name),
+          ),
+        );
+        const sustainLoop = findLoopPoints(decoded, trimStartSec);
+        const extLoop = sustainLoop ? null : findExtensionLoop(decoded, trimStartSec);
+        sustainNote = sustainLoop
+          ? 'Sustain: smooth loop found.'
+          : extLoop
+            ? 'Sustain: extended tail (held notes keep ringing and fade out).'
+            : 'No sustain: this sound is too short, so it ends with the sample.';
         const displayName = cleanSoundDisplayName(file.name) || 'Imported Sound';
-        const isLongPad = decoded.duration >= 4.0;
+        const isLongPad = decoded.duration >= 4.0 || !!sustainLoop;
 
         const preset: InstrumentPreset = {
           id,
@@ -236,7 +271,10 @@ export function ImportSoundView({
           isCustomSample: true,
           sampleRootMidi: rootMidi,
           sampleTrimStartSec: trimStartSec,
-          sampleLoop: isLongPad,
+          sampleLoop: !!sustainLoop,
+          sampleExtend: !!extLoop,
+          sampleLoopStartSec: (sustainLoop ?? extLoop)?.startSec,
+          sampleLoopEndSec: (sustainLoop ?? extLoop)?.endSec,
           sampleDurationSec: decoded.duration,
           fileName: file.name,
         };
@@ -262,9 +300,11 @@ export function ImportSoundView({
       if (lastImportedId) {
         setSelectedId(lastImportedId);
         setStatusMessage(
-          `Imported ${importedCount} external ${importedCount === 1 ? 'sound' : 'sounds'}. Select a Layer below or open the Sound Browser to play it across the keyboard.`,
+          `Imported ${importedCount} external ${importedCount === 1 ? 'sound' : 'sounds'}. ${sustainNote} Select a Layer below or open the Sound Browser to play it across the keyboard.`,
         );
       }
+    } catch (e) {
+      setErrorMessage(e instanceof Error ? e.message : 'Import failed.');
     } finally {
       setImporting(false);
       if (fileInputRef.current) fileInputRef.current.value = '';

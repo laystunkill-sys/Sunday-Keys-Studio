@@ -1,6 +1,7 @@
 import { getTonicPreset } from '../data/tonicPresets';
 import { INSTRUMENT_MAP, KEY_TO_SEMITONE } from '../data/instruments';
 import { SAMPLE_SETS, sampleUrl } from './sampleSets';
+import { buildExtendedChannels } from '../storage/sampleAnalysis';
 import {
   DelaySubdivision,
   InstrumentPreset,
@@ -108,6 +109,38 @@ export class WorshipAudioEngine {
   private customInstruments: Map<string, InstrumentPreset> = new Map();
   private rawSampleBuffers: Map<string, ArrayBuffer> = new Map();
   private decodedSampleBuffers: Map<string, AudioBuffer> = new Map();
+  private extendedBuffers: Map<string, AudioBuffer> = new Map();
+
+  // Decaying samples (piano, keys) are stretched into a long crossfaded version so a
+  // held key keeps sounding; sustained pads use the browser's native loop instead.
+  private getPlayableSample(inst: InstrumentPreset): AudioBuffer | undefined {
+    const base = this.decodedSampleBuffers.get(inst.id);
+    if (
+      !base ||
+      !this.ctx ||
+      !inst.sampleExtend ||
+      inst.sampleLoopStartSec === undefined ||
+      inst.sampleLoopEndSec === undefined
+    ) {
+      return base;
+    }
+    const key = `${inst.id}:${inst.sampleLoopStartSec}:${inst.sampleLoopEndSec}`;
+    const cached = this.extendedBuffers.get(key);
+    if (cached) return cached;
+    const channels: Float32Array[] = [];
+    for (let c = 0; c < base.numberOfChannels; c++) channels.push(base.getChannelData(c));
+    const ext = buildExtendedChannels(
+      channels,
+      base.sampleRate,
+      inst.sampleLoopStartSec,
+      inst.sampleLoopEndSec,
+      30,
+    );
+    const out = this.ctx.createBuffer(ext.length, ext[0].length, base.sampleRate);
+    ext.forEach((data, c) => out.getChannelData(c).set(data));
+    this.extendedBuffers.set(key, out);
+    return out;
+  }
   private sampleSets: Map<string, Map<number, AudioBuffer>> = new Map();
   private sampleSetLoading: Map<string, Promise<void>> = new Map();
   private pressedNotes: Map<number, number> = new Map(); // midi -> velocity
@@ -220,6 +253,9 @@ export class WorshipAudioEngine {
     this.customInstruments.delete(id);
     this.rawSampleBuffers.delete(id);
     this.decodedSampleBuffers.delete(id);
+    Array.from(this.extendedBuffers.keys())
+      .filter((k) => k.startsWith(`${id}:`))
+      .forEach((k) => this.extendedBuffers.delete(k));
   }
 
   public isRunning(): boolean {
@@ -245,14 +281,12 @@ export class WorshipAudioEngine {
       this.noiseBuffer = this.createNoiseBuffer();
       this.buildGraph();
     }
-    if (this.ctx.state === 'suspended') {{ await this.ctx.resume(); }
+    if (this.ctx.state === 'suspended') await this.ctx.resume();
     console.info(
-  '[audio] baseLatency(ms):', Math.round(this.ctx.baseLatency * 1000),
-  'outputLatency(ms):', Math.round((this.ctx.outputLatency || 0) * 1000),
-  'sampleRate:', this.ctx.sampleRate,
-);
-      await this.ctx.resume();
-    }
+      '[audio] baseLatency(ms):', Math.round(this.ctx.baseLatency * 1000),
+      'outputLatency(ms):', Math.round((this.ctx.outputLatency || 0) * 1000),
+      'sampleRate:', this.ctx.sampleRate,
+    );
     // Ensure all registered custom audio samples are decoded
     for (const [id, raw] of this.rawSampleBuffers.entries()) {
       if (!this.decodedSampleBuffers.has(id)) {
@@ -777,9 +811,11 @@ this.triggerVoice(midiNote, velocity, layer, slotIdx);
     }
 
     // Custom Imported Audio Sample Playback (chromatically pitch-shifted)
-    const sampleBuffer = inst.isCustomSample
-      ? this.decodedSampleBuffers.get(inst.id)
-      : undefined;
+    const sampleBuffer = inst.isCustomSample ? this.getPlayableSample(inst) : undefined;
+
+    if (inst.isCustomSample && !sampleBuffer) {
+      console.warn('[audio] custom sample not decoded:', inst.id);
+    }
 
     if (inst.isCustomSample && sampleBuffer) {
       const sampleSrc = ctx.createBufferSource();
@@ -793,10 +829,10 @@ this.triggerVoice(midiNote, velocity, layer, slotIdx);
         Math.max(0, sampleBuffer.duration - 0.03),
       );
 
-      if (inst.sampleLoop) {
+      if (inst.sampleLoop && !inst.sampleExtend) {
         sampleSrc.loop = true;
-        sampleSrc.loopStart = trimStart;
-        sampleSrc.loopEnd = sampleBuffer.duration;
+        sampleSrc.loopStart = inst.sampleLoopStartSec ?? trimStart;
+        sampleSrc.loopEnd = inst.sampleLoopEndSec ?? sampleBuffer.duration;
       }
 
       if (pitchLfoGain) {
@@ -830,7 +866,7 @@ this.triggerVoice(midiNote, velocity, layer, slotIdx);
       src.connect(voiceFilter);
       src.start(startTime);
       oscs.push(src);
-    } else {
+    } else if (!inst.isCustomSample) {
       // Optional FM Modulator (for DX7 / Bell / Synth Keys)
       let fmModOsc: OscillatorNode | null = null;
       let fmModGain: GainNode | null = null;

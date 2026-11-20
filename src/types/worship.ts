@@ -80,8 +80,11 @@ export interface InstrumentPreset {
   sampleRootMidi?: number;
   sampleTrimStartSec?: number;
   sampleLoop?: boolean;
+  sampleLoopStartSec?: number;
+  sampleLoopEndSec?: number;
   sampleDurationSec?: number;
   fileName?: string;
+  sampleExtend?: boolean;
 }
 
 export interface LayerConfig {
