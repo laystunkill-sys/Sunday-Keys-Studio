@@ -167,13 +167,16 @@ export function findLoopPoints(buffer: AudioBuffer, onsetSec = 0): LoopPoints | 
   let bestS = -1;
   let bestE = -1;
 
-  for (let s0 = startMin; s0 < startMax; s0 += 512) {
+  const sStep = Math.max(512, Math.floor((startMax - startMin) / 60));
+  const eStep = Math.max(128, Math.floor((endMax - endMin) / 300));
+
+  for (let s0 = startMin; s0 < startMax; s0 += sStep) {
     const s = snapToZeroCrossing(data, s0);
     if (s - win < 0) continue;
     let energy = 1e-9;
     for (let i = 0; i < win; i++) energy += data[s - win + i] * data[s - win + i];
 
-    for (let e0 = endMin; e0 < endMax; e0 += 128) {
+    for (let e0 = endMin; e0 < endMax; e0 += eStep) {
       const e = snapToZeroCrossing(data, e0);
       if (e >= data.length || e - win < 0) continue;
       let diff = 0;

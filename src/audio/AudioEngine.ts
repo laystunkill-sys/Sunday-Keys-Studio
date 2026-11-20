@@ -1,7 +1,11 @@
 import { getTonicPreset } from '../data/tonicPresets';
 import { INSTRUMENT_MAP, KEY_TO_SEMITONE } from '../data/instruments';
 import { SAMPLE_SETS, sampleUrl } from './sampleSets';
-import { buildExtendedChannels } from '../storage/sampleAnalysis';
+import {
+  buildExtendedChannels,
+  findExtensionLoop,
+  findLoopPoints,
+} from '../storage/sampleAnalysis';
 import {
   DelaySubdivision,
   InstrumentPreset,
@@ -71,6 +75,13 @@ function getSubdivisionFactor(sub: DelaySubdivision): number {
   }
 }
 
+interface SustainPlan {
+  buffer: AudioBuffer;
+  mode: 'once' | 'loop' | 'extended';
+  loopStart?: number;
+  loopEnd?: number;
+}
+
 export class WorshipAudioEngine {
   private ctx: AudioContext | null = null;
   private slotChannels: SlotChannel[] = [];
@@ -109,37 +120,43 @@ export class WorshipAudioEngine {
   private customInstruments: Map<string, InstrumentPreset> = new Map();
   private rawSampleBuffers: Map<string, ArrayBuffer> = new Map();
   private decodedSampleBuffers: Map<string, AudioBuffer> = new Map();
-  private extendedBuffers: Map<string, AudioBuffer> = new Map();
+  private sustainPlans: Map<string, SustainPlan> = new Map();
 
-  // Decaying samples (piano, keys) are stretched into a long crossfaded version so a
-  // held key keeps sounding; sustained pads use the browser's native loop instead.
-  private getPlayableSample(inst: InstrumentPreset): AudioBuffer | undefined {
+  // Decides, from the audio itself, how a held key keeps sounding:
+  //  - steady sounds (pads): the browser's native loop at a level-matched seam
+  //  - decaying sounds (piano/keys/leads): a long crossfaded version that continues the fade
+  //  - very short sounds: plays once
+  // Computed once per sample (cached), so it also fixes sounds imported earlier.
+  private getSustainPlan(inst: InstrumentPreset): SustainPlan | undefined {
     const base = this.decodedSampleBuffers.get(inst.id);
-    if (
-      !base ||
-      !this.ctx ||
-      !inst.sampleExtend ||
-      inst.sampleLoopStartSec === undefined ||
-      inst.sampleLoopEndSec === undefined
-    ) {
-      return base;
-    }
-    const key = `${inst.id}:${inst.sampleLoopStartSec}:${inst.sampleLoopEndSec}`;
-    const cached = this.extendedBuffers.get(key);
+    if (!base || !this.ctx) return base ? { buffer: base, mode: 'once' } : undefined;
+    const onset = Math.max(0, inst.sampleTrimStartSec ?? 0);
+    const key = `${inst.id}:${onset}`;
+    const cached = this.sustainPlans.get(key);
     if (cached) return cached;
-    const channels: Float32Array[] = [];
-    for (let c = 0; c < base.numberOfChannels; c++) channels.push(base.getChannelData(c));
-    const ext = buildExtendedChannels(
-      channels,
-      base.sampleRate,
-      inst.sampleLoopStartSec,
-      inst.sampleLoopEndSec,
-      30,
-    );
-    const out = this.ctx.createBuffer(ext.length, ext[0].length, base.sampleRate);
-    ext.forEach((data, c) => out.getChannelData(c).set(data));
-    this.extendedBuffers.set(key, out);
-    return out;
+
+    let plan: SustainPlan = { buffer: base, mode: 'once' };
+    try {
+      const native = findLoopPoints(base, onset);
+      if (native) {
+        plan = { buffer: base, mode: 'loop', loopStart: native.startSec, loopEnd: native.endSec };
+      } else {
+        const ext = findExtensionLoop(base, onset);
+        if (ext) {
+          const channels: Float32Array[] = [];
+          for (let c = 0; c < base.numberOfChannels; c++) channels.push(base.getChannelData(c));
+          const data = buildExtendedChannels(channels, base.sampleRate, ext.startSec, ext.endSec, 30);
+          const out = this.ctx.createBuffer(data.length, data[0].length, base.sampleRate);
+          data.forEach((d, c) => out.getChannelData(c).set(d));
+          plan = { buffer: out, mode: 'extended' };
+        }
+      }
+    } catch (err) {
+      console.warn('[audio] sustain analysis failed, playing once:', err);
+    }
+    console.info('[audio] sustain plan for', inst.name, '->', plan.mode, plan.loopStart ?? '', plan.loopEnd ?? '');
+    this.sustainPlans.set(key, plan);
+    return plan;
   }
   private sampleSets: Map<string, Map<number, AudioBuffer>> = new Map();
   private sampleSetLoading: Map<string, Promise<void>> = new Map();
@@ -253,9 +270,9 @@ export class WorshipAudioEngine {
     this.customInstruments.delete(id);
     this.rawSampleBuffers.delete(id);
     this.decodedSampleBuffers.delete(id);
-    Array.from(this.extendedBuffers.keys())
+    Array.from(this.sustainPlans.keys())
       .filter((k) => k.startsWith(`${id}:`))
-      .forEach((k) => this.extendedBuffers.delete(k));
+      .forEach((k) => this.sustainPlans.delete(k));
   }
 
   public isRunning(): boolean {
@@ -811,7 +828,8 @@ this.triggerVoice(midiNote, velocity, layer, slotIdx);
     }
 
     // Custom Imported Audio Sample Playback (chromatically pitch-shifted)
-    const sampleBuffer = inst.isCustomSample ? this.getPlayableSample(inst) : undefined;
+    const samplePlan = inst.isCustomSample ? this.getSustainPlan(inst) : undefined;
+    const sampleBuffer = samplePlan?.buffer;
 
     if (inst.isCustomSample && !sampleBuffer) {
       console.warn('[audio] custom sample not decoded:', inst.id);
@@ -829,10 +847,15 @@ this.triggerVoice(midiNote, velocity, layer, slotIdx);
         Math.max(0, sampleBuffer.duration - 0.03),
       );
 
-      if (inst.sampleLoop && !inst.sampleExtend) {
+      if (
+        samplePlan &&
+        samplePlan.mode === 'loop' &&
+        samplePlan.loopStart !== undefined &&
+        samplePlan.loopEnd !== undefined
+      ) {
         sampleSrc.loop = true;
-        sampleSrc.loopStart = inst.sampleLoopStartSec ?? trimStart;
-        sampleSrc.loopEnd = inst.sampleLoopEndSec ?? sampleBuffer.duration;
+        sampleSrc.loopStart = samplePlan.loopStart;
+        sampleSrc.loopEnd = samplePlan.loopEnd;
       }
 
       if (pitchLfoGain) {
